@@ -107,7 +107,7 @@ redis-server
 
 ### 配置
 
-修改 `config/config.json`:
+先复制 `config/config.example.json` 为 `config/config.json`，再修改实际环境配置：
 
 ```json
 {
@@ -185,7 +185,7 @@ bun run dev
 | 菜单加载 | ~50ms | ~1ms | **98%** |
 | 用户信息 | ~30ms | ~1ms | **96.7%** |
 
-详见：[Redis 集成指南](docs/REDIS.md)
+实现见：[`server/common/cache/CacheManager.hpp`](server/common/cache/CacheManager.hpp) 和 [`server/common/database/RedisService.hpp`](server/common/database/RedisService.hpp)
 
 ### 事务管理
 
@@ -206,16 +206,17 @@ tx.onCommit([this, userId]() -> Task<void> {
 co_await tx.commit();
 ```
 
-详见：[事务管理指南](docs/TRANSACTION_GUIDE.md)
+实现见：[`server/common/database/TransactionGuard.hpp`](server/common/database/TransactionGuard.hpp)
 
-## 文档
+## 相关文件
 
-- [开发规范](CLAUDE.md) - 项目编码规范
-- [Redis 集成](docs/REDIS.md) - Redis 缓存使用指南
-- [事务管理](docs/TRANSACTION_GUIDE.md) - 事务封装使用指南
-- [数据库最佳实践](docs/DATABASE_BEST_PRACTICES.md) - 数据库与缓存最佳实践
-- [缓存集成示例](docs/CACHE_INTEGRATION_EXAMPLES.md) - 实际集成示例
-- [事务使用示例](docs/TRANSACTION_EXAMPLES.md) - 事务使用示例
+- [开发规范](AGENTS.md) - 项目编码规范
+- [`config/config.example.json`](config/config.example.json) - 配置模板
+- [`server/common/database/migrations/README.md`](server/common/database/migrations/README.md) - 数据库迁移约定
+- [`server/common/database/TransactionGuard.hpp`](server/common/database/TransactionGuard.hpp) - 事务封装实现
+- [`server/common/cache/CacheManager.hpp`](server/common/cache/CacheManager.hpp) - 缓存管理实现
+
+历史上的 `docs/` 目录已清理，相关说明现在集中在 README、`AGENTS.md` 和源码注释中。
 
 ## License
 
