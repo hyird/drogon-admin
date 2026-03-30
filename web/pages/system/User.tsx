@@ -25,20 +25,9 @@ import {
   useRoleOptions,
   useDepartmentTreeSelect,
 } from "@/services";
+import { userFormSchema, validateWithZod, type UserFormValues } from "@/validation";
 
 const { Search } = Input;
-
-interface UserFormValues {
-  id?: number;
-  username: string;
-  password?: string;
-  nickname?: string;
-  phone?: string;
-  email?: string;
-  departmentId?: number | null;
-  status: User.Status;
-  roleIds?: number[];
-}
 
 const SystemUserPage = () => {
   const [keyword, setKeyword] = useState("");
@@ -114,7 +103,10 @@ const SystemUserPage = () => {
   };
 
   const onFinish = (values: UserFormValues) => {
-    saveMutation.mutate(values as User.CreateDto & { id?: number }, {
+    const parsed = validateWithZod(form, userFormSchema, values);
+    if (!parsed) return;
+
+    saveMutation.mutate(parsed as User.CreateDto & { id?: number }, {
       onSuccess: () => {
         setModalVisible(false);
         setEditing(null);
@@ -250,19 +242,11 @@ const SystemUserPage = () => {
             <Input />
           </Form.Item>
 
-          <Form.Item
-            label="用户名"
-            name="username"
-            rules={[{ required: true, message: "请输入用户名" }]}
-          >
+          <Form.Item label="用户名" name="username" required>
             <Input placeholder="登录用户名" disabled={!!editing} />
           </Form.Item>
 
-          <Form.Item
-            label="密码"
-            name="password"
-            rules={editing ? [] : [{ required: true, message: "请输入密码" }]}
-          >
+          <Form.Item label="密码" name="password" required={!editing}>
             <Input.Password placeholder={editing ? "留空则不修改密码" : "请输入密码"} />
           </Form.Item>
 
@@ -270,24 +254,11 @@ const SystemUserPage = () => {
             <Input placeholder="用户昵称" />
           </Form.Item>
 
-          <Form.Item
-            label="手机号"
-            name="phone"
-            rules={[
-              {
-                pattern: /^1[3-9]\d{9}$/,
-                message: "请输入正确的手机号",
-              },
-            ]}
-          >
+          <Form.Item label="手机号" name="phone">
             <Input placeholder="11位手机号" maxLength={11} />
           </Form.Item>
 
-          <Form.Item
-            label="邮箱"
-            name="email"
-            rules={[{ type: "email", message: "请输入正确的邮箱" }]}
-          >
+          <Form.Item label="邮箱" name="email">
             <Input placeholder="电子邮箱" />
           </Form.Item>
 
@@ -299,11 +270,7 @@ const SystemUserPage = () => {
               treeDefaultExpandAll
             />
           </Form.Item>
-          <Form.Item
-            label="角色"
-            name="roleIds"
-            rules={[{ required: true, message: "请选择至少一个角色" }]}
-          >
+          <Form.Item label="角色" name="roleIds" required>
             <Select
               mode="multiple"
               allowClear={false}
@@ -316,7 +283,7 @@ const SystemUserPage = () => {
             />
           </Form.Item>
 
-          <Form.Item label="状态" name="status" rules={[{ required: true }]}>
+          <Form.Item label="状态" name="status" required>
             <Select>
               <Select.Option value="enabled">启用</Select.Option>
               <Select.Option value="disabled">禁用</Select.Option>

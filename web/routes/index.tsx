@@ -13,6 +13,10 @@ const LoginPage = lazy(() => import("@/pages/system/Login"));
 const AdminLayout = lazy(() => import("@/layouts/AdminLayout"));
 const HomePage = lazy(() => import("@/pages/Home"));
 
+function normalizeRoutePath(path: string): string {
+  return path.trim().replace(/^\/+|\/+$/g, "");
+}
+
 // 从统一注册中心获取组件映射
 const componentMap: Record<string, () => Promise<{ default: ComponentType<unknown> }>> =
   getComponentLoaderMap();
@@ -50,49 +54,47 @@ function getRouteComponent(menu: Menu.Item): React.ReactNode {
 
 export function AppRoutes() {
   useInitAuth();
-  const { pageMenus } = useDynamicRoutes();
-  const router = useMemo(
-    () =>
-      createHashRouter([
-        {
-          element: <RootTransition />,
-          children: [
-            {
-              path: "/login",
-              element: <LoginPage />,
-            },
-            {
-              element: <AuthGuard />,
-              children: [
-                {
-                  path: "/",
-                  element: <AdminLayout />,
-                  children: [
-                    {
-                      index: true,
-                      element: <Navigate to="/home" replace />,
-                    },
-                    {
-                      path: "home",
-                      element: <HomePage />,
-                    },
-                    ...pageMenus.map((menu) => ({
-                      path: menu.path!.trim().replace(/^\//, ""),
-                      element: getRouteComponent(menu),
-                    })),
-                  ],
-                },
-              ],
-            },
-            {
-              path: "*",
-              element: <Navigate to="/" replace />,
-            },
-          ],
-        },
-      ]),
-    [pageMenus]
-  );
+  const { pageMenus, defaultPath } = useDynamicRoutes();
+  const router = useMemo(() => {
+    return createHashRouter([
+      {
+        element: <RootTransition />,
+        children: [
+          {
+            path: "/login",
+            element: <LoginPage />,
+          },
+          {
+            element: <AuthGuard />,
+            children: [
+              {
+                path: "/",
+                element: <AdminLayout />,
+                children: [
+                  {
+                    index: true,
+                    element: <Navigate to={defaultPath} replace />,
+                  },
+                  {
+                    path: "home",
+                    element: <HomePage />,
+                  },
+                  ...pageMenus.map((menu) => ({
+                    path: normalizeRoutePath(menu.path!),
+                    element: getRouteComponent(menu),
+                  })),
+                ],
+              },
+            ],
+          },
+          {
+            path: "*",
+            element: <Navigate to="/" replace />,
+          },
+        ],
+      },
+    ]);
+  }, [pageMenus, defaultPath]);
 
   return <RouterProvider router={router} />;
 }

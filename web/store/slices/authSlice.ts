@@ -30,7 +30,7 @@ export const refreshUser = createAsyncThunk<
   }
 
   try {
-    const remoteUser = await authApi.fetchCurrentUser();
+    const remoteUser = await authApi.fetchCurrentUser(token);
     return remoteUser;
   } catch {
     return rejectWithValue("会话已过期");
@@ -50,30 +50,13 @@ export const refreshAccessToken = createAsyncThunk<
   }
 
   try {
-    const response = await fetch("/api/auth/refresh", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: currentRefreshToken }),
-    });
-
-    if (!response.ok) {
-      return rejectWithValue("刷新令牌失败");
-    }
-
-    const data = await response.json();
-    const { token, refreshToken } = data.data;
-
-    // 获取最新用户信息
-    const userResponse = await fetch("/api/auth/me", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    const userData = await userResponse.json();
+    const { token, refreshToken } = await authApi.refreshToken(currentRefreshToken);
+    const user = await authApi.fetchCurrentUser(token, true);
 
     return {
       token,
       refreshToken,
-      user: userData.data,
+      user,
     };
   } catch {
     return rejectWithValue("刷新令牌失败");

@@ -2,12 +2,17 @@
 
 #include <drogon/HttpController.h>
 #include "common/utils/Response.hpp"
+#include "common/utils/RequestValidation.hpp"
 #include "common/utils/JwtUtils.hpp"
 #include "common/utils/PasswordUtils.hpp"
 #include "common/utils/AppException.hpp"
 #include "common/database/DatabaseService.hpp"
 #include "common/cache/CacheManager.hpp"
 #include "common/utils/FieldHelper.hpp"
+#include "common/utils/AuthContext.hpp"
+#include "SystemConstants.hpp"
+#include "SystemHelpers.hpp"
+#include "AuthRequests.hpp"
 
 using namespace drogon;
 
@@ -43,20 +48,10 @@ public:
 
     Task<HttpResponsePtr> login(HttpRequestPtr req) {
         try {
-            auto json = req->getJsonObject();
-            if (!json) {
-                co_return Response::badRequest("请求体格式错误");
-            }
-
-            std::string username = (*json)["username"].asString();
-            std::string password = (*json)["password"].asString();
-
-            if (username.empty() || password.empty()) {
-                co_return Response::badRequest("用户名和密码不能为空");
-            }
+            auto request = AuthRequests::makeLoginRequest(req);
 
             // 检查登录失败次数
-            auto failureCount = co_await cacheManager_.getLoginFailureCount(username);
+            auto failureCount = co_await cacheManager_.getLoginFailureCount(request.username);
             if (failureCount >= 5) {
                 co_return Response::error(429, "登录失败次数过多，请15分钟后再试", k429TooManyRequests);
             }
@@ -67,10 +62,10 @@ public:
                 WHERE username = ? AND deletedAt IS NULL
             )";
 
-            auto result = co_await dbService_.execSqlCoro(sql, {username});
+            auto result = co_await dbService_.execSqlCoro(sql, {request.username});
 
             if (result.empty()) {
-                co_await cacheManager_.recordLoginFailure(username);
+                co_await cacheManager_.recordLoginFailure(request.username);
                 throw AuthException::PasswordIncorrect();
             }
 
@@ -80,8 +75,8 @@ public:
             std::string nickname = F_STR_DEF(row["nickname"], "");
             std::string status = F_STR(row["status"]);
 
-            if (!PasswordUtils::verifyPassword(password, passwordHash)) {
-                co_await cacheManager_.recordLoginFailure(username);
+            if (!PasswordUtils::verifyPassword(request.password, passwordHash)) {
+                co_await cacheManager_.recordLoginFailure(request.username);
                 throw AuthException::PasswordIncorrect();
             }
 
@@ -90,26 +85,29 @@ public:
             }
 
             // 登录成功，清除失败记录
-            co_await cacheManager_.clearLoginFailure(username);
+            co_await cacheManager_.clearLoginFailure(request.username);
 
-            Json::Value tokenPayload;
-            tokenPayload["userId"] = userId;
-            tokenPayload["username"] = username;
+            SystemHelpers::AuthTokenClaims tokenClaims{
+                .userId = userId,
+                .username = request.username,
+            };
 
-            std::string accessToken = jwtUtils_->sign(tokenPayload);
-            std::string refreshToken = refreshJwtUtils_->sign(tokenPayload);
+            std::string accessToken = jwtUtils_->sign(tokenClaims, SystemHelpers::authTokenClaimsToJson);
+            std::string refreshToken = refreshJwtUtils_->sign(tokenClaims, SystemHelpers::authTokenClaimsToJson);
 
-            auto userInfo = co_await buildUserInfo(userId, username, nickname, status);
+            auto userInfo = co_await buildUserInfo(userId, request.username, nickname, status);
 
             // 缓存用户会话信息
             co_await cacheManager_.cacheUserSession(userId, userInfo);
+            SystemHelpers::LoginResponseSummary response{
+                .tokens = {
+                    .token = accessToken,
+                    .refreshToken = refreshToken,
+                },
+                .user = std::move(userInfo),
+            };
 
-            Json::Value data;
-            data["token"] = accessToken;
-            data["refreshToken"] = refreshToken;
-            data["user"] = userInfo;
-
-            co_return Response::ok(data, "登录成功");
+            co_return Response::ok(response, SystemHelpers::loginResponseToJson, "登录成功");
 
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -121,19 +119,11 @@ public:
 
     Task<HttpResponsePtr> refresh(HttpRequestPtr req) {
         try {
-            auto json = req->getJsonObject();
-            if (!json) {
-                co_return Response::badRequest("请求体格式错误");
-            }
+            auto request = AuthRequests::makeRefreshRequest(req);
 
-            std::string refreshToken = (*json)["refreshToken"].asString();
-            if (refreshToken.empty()) {
-                co_return Response::badRequest("刷新令牌不能为空");
-            }
-
-            Json::Value payload = refreshJwtUtils_->verify(refreshToken);
-            int userId = payload["userId"].asInt();
-            std::string username = payload["username"].asString();
+            auto tokenClaims = refreshJwtUtils_->verify(request.refreshToken, SystemHelpers::authTokenClaimsFromJson);
+            int userId = tokenClaims.userId;
+            std::string username = tokenClaims.username;
 
             std::string sql = R"(
                 SELECT id, status
@@ -152,18 +142,17 @@ public:
                 throw AuthException::UserDisabled();
             }
 
-            Json::Value tokenPayload;
-            tokenPayload["userId"] = userId;
-            tokenPayload["username"] = username;
+            SystemHelpers::AuthTokenClaims claims{
+                .userId = userId,
+                .username = username,
+            };
 
-            std::string newAccessToken = jwtUtils_->sign(tokenPayload);
-            std::string newRefreshToken = refreshJwtUtils_->sign(tokenPayload);
+            SystemHelpers::AuthTokensSummary tokens{
+                .token = jwtUtils_->sign(claims, SystemHelpers::authTokenClaimsToJson),
+                .refreshToken = refreshJwtUtils_->sign(claims, SystemHelpers::authTokenClaimsToJson),
+            };
 
-            Json::Value data;
-            data["token"] = newAccessToken;
-            data["refreshToken"] = newRefreshToken;
-
-            co_return Response::ok(data, "刷新成功");
+            co_return Response::ok(tokens, SystemHelpers::authTokensToJson, "刷新成功");
 
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -175,29 +164,26 @@ public:
 
     Task<HttpResponsePtr> logout(HttpRequestPtr req) {
         try {
-            auto attrs = req->attributes();
-            int userId = attrs->get<int>("userId");
-
-            // 从 Header 中提取 Token
-            std::string authorization = req->getHeader("Authorization");
-            std::string token;
-            if (authorization.find("Bearer ") == 0) {
-                token = authorization.substr(7);
+            SystemHelpers::AuthTokenClaims claims;
+            if (auto authClaims = AuthContext::tryGetAuthClaims(req); authClaims) {
+                claims = *authClaims;
             } else {
-                co_return Response::badRequest("Token 格式错误");
+                claims.userId = req->attributes()->get<int>("userId");
             }
+
+            std::string token = RequestValidation::requireBearerToken(req);
 
             // 验证 Token 并获取剩余有效期
             try {
-                Json::Value payload = jwtUtils_->verify(token);
-                int exp = payload["exp"].asInt();
+                auto tokenClaims = jwtUtils_->verify(token, SystemHelpers::authTokenClaimsFromJson);
+                int exp = static_cast<int>(tokenClaims.expiresAt);
                 int now = static_cast<int>(std::time(nullptr));
                 int remainingTtl = exp - now;
 
                 if (remainingTtl > 0) {
                     // 将 Token 加入黑名单（TTL 为剩余有效期）
                     co_await cacheManager_.blacklistToken(token, remainingTtl);
-                    LOG_INFO << "Token blacklisted for userId: " << userId << ", TTL: " << remainingTtl;
+                    LOG_INFO << "Token blacklisted for userId: " << claims.userId << ", TTL: " << remainingTtl;
                 }
             } catch (const std::exception& e) {
                 LOG_WARN << "Failed to verify token during logout: " << e.what();
@@ -205,9 +191,9 @@ public:
             }
 
             // 清除用户会话缓存
-            co_await cacheManager_.deleteUserSession(userId);
+            co_await cacheManager_.deleteUserSession(claims.userId);
 
-            co_return Response::ok("登出成功");
+            co_return Response::success("登出成功");
 
         } catch (const std::exception& e) {
             LOG_ERROR << "Logout error: " << e.what();
@@ -218,21 +204,25 @@ public:
     Task<HttpResponsePtr> getCurrentUser(HttpRequestPtr req) {
         try {
             auto attrs = req->attributes();
-            if (!attrs->find("userId") || !attrs->find("username")) {
+            if (!attrs->find("authClaims") && !attrs->find("userId")) {
                 co_return Response::unauthorized("未授权访问");
             }
 
-            int userId = attrs->get<int>("userId");
-            std::string username = attrs->get<std::string>("username");
-
-            // 先尝试从缓存获取
-            auto cached = co_await cacheManager_.getUserSession(userId);
-            if (cached) {
-                LOG_DEBUG << "User session cache hit for userId: " << userId;
-                co_return Response::ok(*cached, "获取成功");
+            SystemHelpers::AuthTokenClaims claims;
+            if (auto authClaims = AuthContext::tryGetAuthClaims(req); authClaims) {
+                claims = *authClaims;
+            } else {
+                claims.userId = attrs->get<int>("userId");
             }
 
-            LOG_DEBUG << "User session cache miss for userId: " << userId;
+            // 先尝试从缓存获取
+            auto cached = co_await cacheManager_.getUserSession(claims.userId);
+            if (cached) {
+                LOG_DEBUG << "User session cache hit for userId: " << claims.userId;
+                co_return Response::ok(*cached, SystemHelpers::currentUserToJson, "获取成功");
+            }
+
+            LOG_DEBUG << "User session cache miss for userId: " << claims.userId;
 
             std::string sql = R"(
                 SELECT id, username, nickname, status
@@ -240,13 +230,16 @@ public:
                 WHERE id = ? AND deletedAt IS NULL
             )";
 
-            auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(userId)});
+            auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(claims.userId)});
 
             if (result.empty()) {
                 throw AuthException::UserNotFound();
             }
 
             auto row = result[0];
+            if (claims.username.empty()) {
+                claims.username = F_STR(row["username"]);
+            }
             std::string nickname = F_STR_DEF(row["nickname"], "");
             std::string status = F_STR(row["status"]);
 
@@ -254,12 +247,11 @@ public:
                 throw AuthException::UserDisabled();
             }
 
-            auto userInfo = co_await buildUserInfo(userId, username, nickname, status);
-
+            auto userInfo = co_await buildUserInfo(claims.userId, claims.username, nickname, status);
             // 缓存结果
-            co_await cacheManager_.cacheUserSession(userId, userInfo);
+            co_await cacheManager_.cacheUserSession(claims.userId, userInfo);
 
-            co_return Response::ok(userInfo, "获取成功");
+            co_return Response::ok(userInfo, SystemHelpers::currentUserToJson, "获取成功");
 
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -270,37 +262,28 @@ public:
     }
 
 private:
-    Task<Json::Value> buildUserInfo(int userId, const std::string& username,
-                                      const std::string& nickname, const std::string& status) {
-        Json::Value userInfo;
-        userInfo["id"] = userId;
-        userInfo["username"] = username;
-        userInfo["nickname"] = nickname;
-        userInfo["status"] = status;
+    Task<SystemHelpers::CurrentUserSummary> buildUserInfo(int userId,
+                                                          const std::string& username,
+                                                          const std::string& nickname,
+                                                          const std::string& status) {
+        SystemHelpers::CurrentUserSummary userInfo;
+        userInfo.id = userId;
+        userInfo.username = username;
+        userInfo.nickname = nickname;
+        userInfo.status = status;
 
-        auto roles = co_await getUserRoles(userId);
-        userInfo["roles"] = roles;
+        userInfo.roles = co_await getUserRoles(userId);
 
-        bool isSuperadmin = false;
-        for (const auto& role : roles) {
-            if (role["code"].asString() == "superadmin") {
-                isSuperadmin = true;
-                break;
-            }
-        }
-
-        Json::Value menus;
-        if (isSuperadmin) {
-            menus = co_await getAllMenus();
+        if (SystemHelpers::hasSuperadminRole(userInfo.roles)) {
+            userInfo.menus = co_await getAllMenus();
         } else {
-            menus = co_await getUserMenus(userId);
+            userInfo.menus = co_await getUserMenus(userId);
         }
-        userInfo["menus"] = menus;
 
         co_return userInfo;
     }
 
-    Task<Json::Value> getUserRoles(int userId) {
+    Task<std::vector<SystemHelpers::RoleSummary>> getUserRoles(int userId) {
         // 先尝试从缓存获取
         auto cached = co_await cacheManager_.getUserRoles(userId);
         if (cached) {
@@ -319,13 +302,10 @@ private:
 
         auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(userId)});
 
-        Json::Value roles(Json::arrayValue);
+        std::vector<SystemHelpers::RoleSummary> roles;
+        roles.reserve(result.size());
         for (const auto& row : result) {
-            Json::Value role;
-            role["id"] = F_INT(row["id"]);
-            role["name"] = F_STR(row["name"]);
-            role["code"] = F_STR(row["code"]);
-            roles.append(role);
+            roles.push_back(SystemHelpers::roleSummaryFromRow(row));
         }
 
         // 缓存结果
@@ -334,7 +314,7 @@ private:
         co_return roles;
     }
 
-    Task<Json::Value> getAllMenus() {
+    Task<std::vector<SystemHelpers::MenuSummary>> getAllMenus() {
         // 先尝试从缓存获取
         auto cached = co_await cacheManager_.getAllMenus();
         if (cached) {
@@ -354,20 +334,10 @@ private:
 
         auto result = co_await dbService_.execSqlCoro(sql);
 
-        Json::Value menus(Json::arrayValue);
+        std::vector<SystemHelpers::MenuSummary> menus;
+        menus.reserve(result.size());
         for (const auto& row : result) {
-            Json::Value menu;
-            menu["id"] = F_INT(row["id"]);
-            menu["name"] = F_STR(row["name"]);
-            menu["parentId"] = F_INT(row["parentId"]);
-            menu["type"] = F_STR(row["type"]);
-            menu["path"] = F_STR_DEF(row["path"], "");
-            menu["component"] = F_STR_DEF(row["component"], "");
-            menu["permissionCode"] = F_STR_DEF(row["permissionCode"], "");
-            menu["icon"] = F_STR_DEF(row["icon"], "");
-            menu["order"] = F_INT(row["order"]);
-            menu["visible"] = F_BOOL(row["visible"]);
-            menus.append(menu);
+            menus.push_back(SystemHelpers::menuSummaryFromRow(row));
         }
 
         // 缓存结果
@@ -376,7 +346,7 @@ private:
         co_return menus;
     }
 
-    Task<Json::Value> getUserMenus(int userId) {
+    Task<std::vector<SystemHelpers::MenuSummary>> getUserMenus(int userId) {
         // 先尝试从缓存获取
         auto cached = co_await cacheManager_.getUserMenus(userId);
         if (cached) {
@@ -401,20 +371,10 @@ private:
 
         auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(userId)});
 
-        Json::Value menus(Json::arrayValue);
+        std::vector<SystemHelpers::MenuSummary> menus;
+        menus.reserve(result.size());
         for (const auto& row : result) {
-            Json::Value menu;
-            menu["id"] = F_INT(row["id"]);
-            menu["name"] = F_STR(row["name"]);
-            menu["parentId"] = F_INT(row["parentId"]);
-            menu["type"] = F_STR(row["type"]);
-            menu["path"] = F_STR_DEF(row["path"], "");
-            menu["component"] = F_STR_DEF(row["component"], "");
-            menu["permissionCode"] = F_STR_DEF(row["permissionCode"], "");
-            menu["icon"] = F_STR_DEF(row["icon"], "");
-            menu["order"] = F_INT(row["order"]);
-            menu["visible"] = F_BOOL(row["visible"]);
-            menus.append(menu);
+            menus.push_back(SystemHelpers::menuSummaryFromRow(row));
         }
 
         // 缓存结果

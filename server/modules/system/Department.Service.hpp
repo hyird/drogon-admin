@@ -7,6 +7,8 @@
 #include "common/utils/AppException.hpp"
 #include "common/utils/FieldHelper.hpp"
 #include "common/utils/TimestampHelper.hpp"
+#include "SystemHelpers.hpp"
+#include "SystemRequests.hpp"
 
 using namespace drogon;
 
@@ -18,69 +20,103 @@ private:
     DatabaseService dbService_;
 
 public:
-    Task<Json::Value> list(const std::string& keyword = "", const std::string& status = "") {
+    Task<std::vector<SystemHelpers::DepartmentRecordSummary>> list(const SystemRequests::DepartmentListQuery& query) {
         QueryBuilder qb;
         qb.notDeleted();
-        if (!keyword.empty()) qb.likeAny({"name", "code"}, keyword);
-        if (!status.empty()) qb.eq("status", status);
+        if (query.keyword) {
+            qb.likeAny({"name", "code"}, *query.keyword);
+        }
+        if (query.status) {
+            qb.eq("status", *query.status);
+        }
 
         std::string sql = "SELECT * FROM sys_department" + qb.whereClause() + " ORDER BY `order` ASC, id ASC";
         auto result = co_await dbService_.execSqlCoro(sql, qb.params());
 
-        Json::Value items(Json::arrayValue);
-        for (const auto& row : result) items.append(rowToJson(row));
+        std::vector<SystemHelpers::DepartmentRecordSummary> items;
+        items.reserve(result.size());
+        for (const auto& row : result) {
+            items.push_back(SystemHelpers::departmentRecordFromRow(row));
+        }
         co_return items;
     }
 
-    Task<Json::Value> tree(const std::string& status = "") {
-        auto items = co_await list("", status);
-        auto tree = TreeBuilder::build(items);
-        TreeBuilder::sort(tree, "order", true);
+    Task<std::vector<TreeBuilder::TreeNode<SystemHelpers::DepartmentRecordSummary>>> tree(const SystemRequests::DepartmentTreeQuery& query) {
+        QueryBuilder qb;
+        qb.notDeleted();
+        if (query.status) {
+            qb.eq("status", *query.status);
+        }
+
+        std::string sql = "SELECT * FROM sys_department" + qb.whereClause() + " ORDER BY `order` ASC, id ASC";
+        auto result = co_await dbService_.execSqlCoro(sql, qb.params());
+
+        std::vector<SystemHelpers::DepartmentRecordSummary> items;
+        items.reserve(result.size());
+        for (const auto& row : result) {
+            items.push_back(SystemHelpers::departmentRecordFromRow(row));
+        }
+
+        auto tree = TreeBuilder::build(items,
+            [](const auto& item) { return item.id; },
+            [](const auto& item) { return item.parentId; });
+        TreeBuilder::sort(tree, [](const auto& item) { return item.order; }, true);
         co_return tree;
     }
 
-    Task<Json::Value> detail(int id) {
+    Task<SystemHelpers::DepartmentRecordSummary> detail(int id) {
         std::string sql = "SELECT * FROM sys_department WHERE id = ? AND deletedAt IS NULL";
         auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(id)});
         if (result.empty()) throw NotFoundException("部门不存在");
-        co_return rowToJson(result[0]);
+        co_return SystemHelpers::departmentRecordFromRow(result[0]);
     }
 
-    Task<void> create(const Json::Value& data) {
-        std::string code = data.get("code", "").asString();
-        if (!code.empty()) co_await checkCodeUnique(code);
+    Task<void> create(const SystemRequests::DepartmentCreateRequest& data) {
+        if (data.code && !data.code->empty()) co_await checkCodeUnique(*data.code);
 
         std::string sql = R"(
             INSERT INTO sys_department (name, code, parentId, `order`, leaderId, status, createdAt)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         )";
         std::vector<std::string> params = {
-            data.get("name", "").asString(), code,
-            data.get("parentId", 0).isNull() ? "0" : std::to_string(data["parentId"].asInt()),
-            std::to_string(data.get("order", 0).asInt()),
-            data["leaderId"].isNull() ? "" : std::to_string(data["leaderId"].asInt()),
-            data.get("status", "enabled").asString(),
+            data.name,
+            data.code.value_or(""),
+            data.parentId.has_value() ? std::to_string(*data.parentId) : "0",
+            std::to_string(data.order.value_or(0)),
+            data.leaderId.has_value() ? std::to_string(*data.leaderId) : "",
+            data.status,
             TimestampHelper::now()
         };
         co_await dbService_.execSqlCoro(sql, params);
     }
 
-    Task<void> update(int id, const Json::Value& data) {
+    Task<void> update(int id, const SystemRequests::DepartmentUpdateRequest& data) {
         co_await detail(id);
-        if (data.isMember("code") && !data["code"].isNull()) {
-            std::string code = data["code"].asString();
-            if (!code.empty()) co_await checkCodeUnique(code, id);
+        if (data.code && !data.code->empty()) {
+            co_await checkCodeUnique(*data.code, id);
         }
 
         std::vector<std::string> setClauses, params;
         auto addField = [&setClauses, &params](const std::string& f, const std::string& v) { setClauses.push_back(f + " = ?"); params.push_back(v); };
 
-        if (data.isMember("name")) addField("name", data["name"].asString());
-        if (data.isMember("code")) addField("code", data["code"].asString());
-        if (data.isMember("parentId")) addField("parentId", data["parentId"].isNull() ? "0" : std::to_string(data["parentId"].asInt()));
-        if (data.isMember("order")) addField("`order`", std::to_string(data["order"].asInt()));
-        if (data.isMember("leaderId")) addField("leaderId", data["leaderId"].isNull() ? "" : std::to_string(data["leaderId"].asInt()));
-        if (data.isMember("status")) addField("status", data["status"].asString());
+        if (data.name) addField("name", *data.name);
+        if (data.code) addField("code", *data.code);
+        if (data.parentId.has_value()) {
+            if (data.parentId->has_value()) {
+                addField("parentId", std::to_string(**data.parentId));
+            } else {
+                addField("parentId", "0");
+            }
+        }
+        if (data.order) addField("`order`", std::to_string(*data.order));
+        if (data.leaderId.has_value()) {
+            if (data.leaderId->has_value()) {
+                addField("leaderId", std::to_string(**data.leaderId));
+            } else {
+                addField("leaderId", "");
+            }
+        }
+        if (data.status) addField("status", *data.status);
 
         if (setClauses.empty()) co_return;
         addField("updatedAt", TimestampHelper::now());
@@ -106,8 +142,6 @@ public:
         co_await dbService_.execSqlCoro("UPDATE sys_department SET deletedAt = ? WHERE id = ?",
                                          {TimestampHelper::now(), std::to_string(id)});
     }
-
-private:
     Task<void> checkCodeUnique(const std::string& code, int excludeId = 0) {
         std::string sql = "SELECT id FROM sys_department WHERE code = ? AND deletedAt IS NULL";
         std::vector<std::string> params = {code};
@@ -116,17 +150,4 @@ private:
         if (!result.empty()) throw ValidationException("部门编码已存在");
     }
 
-    Json::Value rowToJson(const drogon::orm::Row& row) {
-        Json::Value json;
-        json["id"] = F_INT(row["id"]);
-        json["name"] = F_STR(row["name"]);
-        json["code"] = F_STR_DEF(row["code"], "");
-        json["parentId"] = F_INT_DEF(row["parentId"], 0);
-        json["order"] = F_INT_DEF(row["order"], 0);
-        json["leaderId"] = F_INT_DEF(row["leaderId"], 0);
-        json["status"] = F_STR_DEF(row["status"], "enabled");
-        json["createdAt"] = F_STR_DEF(row["createdAt"], "");
-        json["updatedAt"] = F_STR_DEF(row["updatedAt"], "");
-        return json;
-    }
 };

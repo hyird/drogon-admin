@@ -8,6 +8,8 @@
 #include "common/utils/AppException.hpp"
 #include "common/utils/FieldHelper.hpp"
 #include "common/utils/TimestampHelper.hpp"
+#include "SystemHelpers.hpp"
+#include "SystemRequests.hpp"
 
 using namespace drogon;
 
@@ -20,45 +22,73 @@ private:
     CacheManager cacheManager_;
 
 public:
-    Task<Json::Value> list(const std::string& keyword = "", const std::string& status = "") {
+    Task<std::vector<SystemHelpers::MenuRecordSummary>> list(const SystemRequests::MenuListQuery& query) {
         QueryBuilder qb;
         qb.notDeleted();
-        if (!keyword.empty()) qb.likeAny({"name", "path", "permissionCode"}, keyword);
-        if (!status.empty()) qb.eq("status", status);
+        if (query.keyword) {
+            qb.likeAny({"name", "path", "permissionCode"}, *query.keyword);
+        }
+        if (query.status) {
+            qb.eq("status", *query.status);
+        }
 
         std::string sql = "SELECT * FROM sys_menu" + qb.whereClause() + " ORDER BY `order` ASC, id ASC";
         auto result = co_await dbService_.execSqlCoro(sql, qb.params());
 
-        Json::Value items(Json::arrayValue);
-        for (const auto& row : result) items.append(rowToJson(row));
+        std::vector<SystemHelpers::MenuRecordSummary> items;
+        items.reserve(result.size());
+        for (const auto& row : result) {
+            items.push_back(SystemHelpers::menuRecordFromRow(row));
+        }
         co_return items;
     }
 
-    Task<Json::Value> tree(const std::string& status = "") {
-        auto items = co_await list("", status);
-        auto tree = TreeBuilder::build(items);
-        TreeBuilder::sort(tree, "order", true);
+    Task<std::vector<TreeBuilder::TreeNode<SystemHelpers::MenuRecordSummary>>> tree(const SystemRequests::MenuTreeQuery& query) {
+        QueryBuilder qb;
+        qb.notDeleted();
+        if (query.status) {
+            qb.eq("status", *query.status);
+        }
+
+        std::string sql = "SELECT * FROM sys_menu" + qb.whereClause() + " ORDER BY `order` ASC, id ASC";
+        auto result = co_await dbService_.execSqlCoro(sql, qb.params());
+
+        std::vector<SystemHelpers::MenuRecordSummary> items;
+        items.reserve(result.size());
+        for (const auto& row : result) {
+            items.push_back(SystemHelpers::menuRecordFromRow(row));
+        }
+
+        auto tree = TreeBuilder::build(items,
+            [](const auto& item) { return item.id; },
+            [](const auto& item) { return item.parentId; });
+        TreeBuilder::sort(tree, [](const auto& item) { return item.order; }, true);
         co_return tree;
     }
 
-    Task<Json::Value> detail(int id) {
+    Task<SystemHelpers::MenuRecordSummary> detail(int id) {
         std::string sql = "SELECT * FROM sys_menu WHERE id = ? AND deletedAt IS NULL";
         auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(id)});
         if (result.empty()) throw NotFoundException("菜单不存在");
-        co_return rowToJson(result[0]);
+        co_return SystemHelpers::menuRecordFromRow(result[0]);
     }
 
-    Task<void> create(const Json::Value& data) {
+    Task<void> create(const SystemRequests::MenuCreateRequest& data) {
         std::string sql = R"(
             INSERT INTO sys_menu (name, path, icon, parentId, `order`, type, component, status, permissionCode, isDefault, createdAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         )";
         std::vector<std::string> params = {
-            data.get("name", "").asString(), data.get("path", "").asString(), data.get("icon", "").asString(),
-            data.get("parentId", 0).isNull() ? "0" : std::to_string(data["parentId"].asInt()),
-            std::to_string(data.get("order", 0).asInt()), data.get("type", "menu").asString(),
-            data.get("component", "").asString(), data.get("status", "enabled").asString(),
-            data.get("permissionCode", "").asString(), data.get("isDefault", false).asBool() ? "1" : "0",
+            data.name,
+            data.path.value_or(""),
+            data.icon.value_or(""),
+            data.parentId.has_value() ? std::to_string(*data.parentId) : "0",
+            std::to_string(data.order.value_or(0)),
+            data.type,
+            data.component.value_or(""),
+            data.status,
+            data.permissionCode.value_or(""),
+            data.isDefault.value_or(false) ? "1" : "0",
             TimestampHelper::now()
         };
         co_await dbService_.execSqlCoro(sql, params);
@@ -67,24 +97,30 @@ public:
         co_await cacheManager_.clearAllUserMenusCache();
     }
 
-    Task<void> update(int id, const Json::Value& data) {
+    Task<void> update(int id, const SystemRequests::MenuUpdateRequest& data) {
         co_await detail(id);
-        if (data.isMember("parentId") && !data["parentId"].isNull() && data["parentId"].asInt() == id)
+        if (data.parentId.has_value() && data.parentId->has_value() && **data.parentId == id)
             throw ValidationException("不能将菜单设为自己的子菜单");
 
         std::vector<std::string> setClauses, params;
         auto addField = [&setClauses, &params](const std::string& f, const std::string& v) { setClauses.push_back(f + " = ?"); params.push_back(v); };
 
-        if (data.isMember("name")) addField("name", data["name"].asString());
-        if (data.isMember("path")) addField("path", data["path"].asString());
-        if (data.isMember("icon")) addField("icon", data["icon"].asString());
-        if (data.isMember("parentId")) addField("parentId", data["parentId"].isNull() ? "0" : std::to_string(data["parentId"].asInt()));
-        if (data.isMember("order")) addField("`order`", std::to_string(data["order"].asInt()));
-        if (data.isMember("type")) addField("type", data["type"].asString());
-        if (data.isMember("component")) addField("component", data["component"].asString());
-        if (data.isMember("status")) addField("status", data["status"].asString());
-        if (data.isMember("permissionCode")) addField("permissionCode", data["permissionCode"].asString());
-        if (data.isMember("isDefault")) addField("isDefault", data["isDefault"].asBool() ? "1" : "0");
+        if (data.name) addField("name", *data.name);
+        if (data.path) addField("path", *data.path);
+        if (data.icon) addField("icon", *data.icon);
+        if (data.parentId.has_value()) {
+            if (data.parentId->has_value()) {
+                addField("parentId", std::to_string(**data.parentId));
+            } else {
+                addField("parentId", "0");
+            }
+        }
+        if (data.order) addField("`order`", std::to_string(*data.order));
+        if (data.type) addField("type", *data.type);
+        if (data.component) addField("component", *data.component);
+        if (data.status) addField("status", *data.status);
+        if (data.permissionCode) addField("permissionCode", *data.permissionCode);
+        if (data.isDefault.has_value()) addField("isDefault", *data.isDefault ? "1" : "0");
 
         if (setClauses.empty()) co_return;
         addField("updatedAt", TimestampHelper::now());
@@ -111,24 +147,5 @@ public:
 
         // 清除所有用户的菜单缓存
         co_await cacheManager_.clearAllUserMenusCache();
-    }
-
-private:
-    Json::Value rowToJson(const drogon::orm::Row& row) {
-        Json::Value json;
-        json["id"] = F_INT(row["id"]);
-        json["name"] = F_STR(row["name"]);
-        json["path"] = F_STR_DEF(row["path"], "");
-        json["icon"] = F_STR_DEF(row["icon"], "");
-        json["parentId"] = F_INT_DEF(row["parentId"], 0);
-        json["order"] = F_INT_DEF(row["order"], 0);
-        json["type"] = F_STR_DEF(row["type"], "menu");
-        json["component"] = F_STR_DEF(row["component"], "");
-        json["status"] = F_STR_DEF(row["status"], "enabled");
-        json["permissionCode"] = F_STR_DEF(row["permissionCode"], "");
-        json["isDefault"] = F_INT_DEF(row["isDefault"], 0) == 1;
-        json["createdAt"] = F_STR_DEF(row["createdAt"], "");
-        json["updatedAt"] = F_STR_DEF(row["updatedAt"], "");
-        return json;
     }
 };

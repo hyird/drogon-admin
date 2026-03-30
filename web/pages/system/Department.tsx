@@ -22,18 +22,9 @@ import { departmentApi, userApi } from "@/services";
 import { usePermission } from "@/hooks";
 import { StatusTag } from "@/components/StatusTag";
 import { PageContainer } from "@/components/PageContainer";
+import { departmentFormSchema, validateWithZod, type DepartmentFormValues } from "@/validation";
 
 const { Search } = Input;
-
-interface DepartmentFormValues {
-  id?: number;
-  name: string;
-  code?: string;
-  parentId?: number | null;
-  order?: number;
-  leaderId?: number | null;
-  status: Department.Status;
-}
 
 function filterDepartmentTree(tree: Department.TreeItem[], keyword: string): Department.TreeItem[] {
   const kw = keyword.trim().toLowerCase();
@@ -199,7 +190,10 @@ const SystemDepartmentPage = () => {
   };
 
   const onFinish = (values: DepartmentFormValues) => {
-    saveMutation.mutate(values);
+    const parsed = validateWithZod(form, departmentFormSchema, values);
+    if (!parsed) return;
+
+    saveMutation.mutate(parsed);
   };
 
   // 无查询权限时显示提示
@@ -340,11 +334,7 @@ const SystemDepartmentPage = () => {
             <Input />
           </Form.Item>
 
-          <Form.Item
-            label="部门名称"
-            name="name"
-            rules={[{ required: true, message: "请输入部门名称" }]}
-          >
+          <Form.Item label="部门名称" name="name" required>
             <Input placeholder="请输入部门名称" />
           </Form.Item>
 
@@ -378,7 +368,7 @@ const SystemDepartmentPage = () => {
             <InputNumber style={{ width: "100%" }} placeholder="数值越小越靠前" />
           </Form.Item>
 
-          <Form.Item label="状态" name="status" rules={[{ required: true }]}>
+          <Form.Item label="状态" name="status" required>
             <Select>
               <Select.Option value="enabled">启用</Select.Option>
               <Select.Option value="disabled">禁用</Select.Option>

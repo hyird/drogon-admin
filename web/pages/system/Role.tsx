@@ -15,16 +15,9 @@ import {
   roleApi,
   useMenuTree,
 } from "@/services";
+import { roleFormSchema, validateWithZod, type RoleFormValues } from "@/validation";
 
 const { Search } = Input;
-
-interface RoleFormValues {
-  id?: number;
-  name: string;
-  code: string;
-  status: Role.Status;
-  menuIds: number[];
-}
 
 function menuTreeToTreeData(menus: Menu.TreeItem[]): TreeDataNode[] {
   return menus.map((m) => ({
@@ -186,7 +179,10 @@ const SystemRolePage = () => {
   };
 
   const onFinish = (values: RoleFormValues) => {
-    saveMutation.mutate(values, {
+    const parsed = validateWithZod(form, roleFormSchema, values);
+    if (!parsed) return;
+
+    saveMutation.mutate(parsed, {
       onSuccess: () => {
         setModalVisible(false);
         setEditing(null);
@@ -369,27 +365,13 @@ const SystemRolePage = () => {
           <Form.Item name="id" hidden>
             <Input />
           </Form.Item>
-          <Form.Item
-            label="角色名称"
-            name="name"
-            rules={[{ required: true, message: "请输入角色名称" }]}
-          >
+          <Form.Item label="角色名称" name="name" required>
             <Input placeholder="例如：系统管理员" />
           </Form.Item>
-          <Form.Item
-            label="角色编码"
-            name="code"
-            rules={[
-              { required: true, message: "请输入角色编码" },
-              {
-                pattern: /^[a-zA-Z][a-zA-Z0-9_]*$/,
-                message: "编码以字母开头，只能包含字母、数字、下划线",
-              },
-            ]}
-          >
+          <Form.Item label="角色编码" name="code" required>
             <Input placeholder="例如：admin" disabled={editing?.code === "superadmin"} />
           </Form.Item>
-          <Form.Item label="状态" name="status" rules={[{ required: true }]}>
+          <Form.Item label="状态" name="status" required>
             <Select>
               <Select.Option value="enabled">启用</Select.Option>
               <Select.Option value="disabled">禁用</Select.Option>

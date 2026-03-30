@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
 #include <json/json.h>
 #include <string>
-#include <cmath>
+
+#include "RequestValidation.hpp"
 
 using namespace drogon;
 
@@ -15,7 +17,7 @@ using namespace drogon;
 struct Pagination {
     int page = 1;
     int pageSize = 0;  // 0 表示不分页
-    int offset = 0;
+    long long offset = 0;
     std::string keyword;
 
     bool isPaged() const { return pageSize > 0; }
@@ -23,45 +25,32 @@ struct Pagination {
     static Pagination fromRequest(const HttpRequestPtr& req) {
         Pagination p;
 
-        auto pageSizeStr = req->getParameter("pageSize");
-        if (!pageSizeStr.empty()) {
-            try {
-                p.pageSize = std::stoi(pageSizeStr);
-                if (p.pageSize < 1) p.pageSize = 10;
-                if (p.pageSize > 100) p.pageSize = 100;
-            } catch (...) {
-                p.pageSize = 10;
+        if (auto pageSize = RequestValidation::optionalPositiveIntQuery(req, "pageSize", "每页条数")) {
+            p.pageSize = std::clamp(*pageSize, 1, 100);
+            if (auto page = RequestValidation::optionalPositiveIntQuery(req, "page", "页码")) {
+                p.page = *page;
             }
-
-            auto pageStr = req->getParameter("page");
-            if (!pageStr.empty()) {
-                try {
-                    p.page = std::stoi(pageStr);
-                    if (p.page < 1) p.page = 1;
-                } catch (...) {
-                    p.page = 1;
-                }
-            }
-
-            p.offset = (p.page - 1) * p.pageSize;
+            p.offset = static_cast<long long>(p.page - 1) * p.pageSize;
         }
 
-        p.keyword = req->getParameter("keyword");
+        p.keyword = RequestValidation::optionalQueryText(req, "keyword").value_or("");
         return p;
     }
 
-    static HttpResponsePtr buildResponse(const Json::Value& items,
-                                          int total,
+    template <typename T, typename ToJson>
+    static HttpResponsePtr buildResponse(const std::vector<T>& items,
+                                         ToJson convert,
+                                         int total,
                                           int page,
                                           int pageSize) {
         Json::Value data;
-        data["list"] = items;
+        data["list"] = convert(items);
         data["total"] = total;
 
         if (pageSize > 0) {
             data["page"] = page;
             data["pageSize"] = pageSize;
-            data["totalPages"] = static_cast<int>(std::ceil(static_cast<double>(total) / pageSize));
+            data["totalPages"] = (total + pageSize - 1) / pageSize;
         }
 
         Json::Value json;
@@ -92,6 +81,14 @@ public:
     QueryBuilder& eq(const std::string& field, const std::string& value) {
         if (!value.empty()) {
             conditions_.push_back(field + " = ?");
+            params_.push_back(value);
+        }
+        return *this;
+    }
+
+    QueryBuilder& ne(const std::string& field, const std::string& value) {
+        if (!value.empty()) {
+            conditions_.push_back(field + " != ?");
             params_.push_back(value);
         }
         return *this;

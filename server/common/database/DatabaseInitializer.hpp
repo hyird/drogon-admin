@@ -4,6 +4,7 @@
 #include <drogon/orm/DbClient.h>
 #include "common/utils/PasswordUtils.hpp"
 #include "DatabaseService.hpp"
+#include "modules/system/SystemConstants.hpp"
 
 using namespace drogon;
 using namespace drogon::orm;
@@ -11,14 +12,17 @@ using namespace drogon::orm;
 class DatabaseInitializer {
 private:
     static DbClientPtr getDbClient() {
-        return AppDbConfig::useFast()
-            ? app().getFastDbClient("default")
-            : app().getDbClient("default");
+        DatabaseService dbService;
+        return dbService.getClient();
     }
 
 public:
     static Task<> initialize() {
         auto db = getDbClient();
+        if (!db) {
+            LOG_ERROR << "Database client is not available, skip initialization";
+            co_return;
+        }
 
         LOG_INFO << "Checking database initialization...";
 
@@ -160,25 +164,30 @@ private:
         // 创建超级管理员角色
         co_await db->execSqlCoro(buildSql(
             "INSERT IGNORE INTO sys_role (name, code, description, `order`) VALUES (?, ?, ?, ?)",
-            {"超级管理员", "superadmin", "拥有系统所有权限", "1"}
+            {std::string(SystemConstants::DEFAULT_ADMIN_NICKNAME),
+             std::string(SystemConstants::SUPERADMIN_ROLE_CODE),
+             "拥有系统所有权限", "1"}
         ));
 
         // 获取角色ID
         auto roleResult = co_await db->execSqlCoro(
-            "SELECT id FROM sys_role WHERE code = 'superadmin'"
+            buildSql("SELECT id FROM sys_role WHERE code = ?", {std::string(SystemConstants::SUPERADMIN_ROLE_CODE)})
         );
         int roleId = roleResult[0]["id"].as<int>();
 
         // 创建管理员用户 (密码: admin123)
-        std::string passwordHash = PasswordUtils::hashPassword("admin123");
+        std::string passwordHash = PasswordUtils::hashPassword(std::string(SystemConstants::DEFAULT_ADMIN_PASSWORD));
         co_await db->execSqlCoro(buildSql(
             "INSERT INTO sys_user (username, passwordHash, nickname, status) VALUES (?, ?, ?, ?)",
-            {"admin", passwordHash, "超级管理员", "enabled"}
+            {std::string(SystemConstants::DEFAULT_ADMIN_USERNAME),
+             passwordHash,
+             std::string(SystemConstants::DEFAULT_ADMIN_NICKNAME),
+             "enabled"}
         ));
 
         // 获取用户ID
         auto userResult = co_await db->execSqlCoro(
-            "SELECT id FROM sys_user WHERE username = 'admin'"
+            buildSql("SELECT id FROM sys_user WHERE username = ?", {std::string(SystemConstants::DEFAULT_ADMIN_USERNAME)})
         );
         int userId = userResult[0]["id"].as<int>();
 
@@ -191,7 +200,7 @@ private:
         // 创建基础菜单
         co_await initializeMenus(db);
 
-        LOG_INFO << "Default admin user created: admin / admin123";
+        LOG_INFO << "Default admin user created: " << SystemConstants::DEFAULT_ADMIN_USERNAME << " / " << SystemConstants::DEFAULT_ADMIN_PASSWORD;
     }
 
     static Task<> initializeMenus(const DbClientPtr& db) {

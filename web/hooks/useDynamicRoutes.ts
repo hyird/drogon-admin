@@ -8,6 +8,14 @@ interface DynamicRoutesResult {
   isLoading: boolean;
 }
 
+function normalizeRoutePath(path?: string | null): string | undefined {
+  const trimmedPath = path?.trim().replace(/^\/+|\/+$/g, "");
+  if (!trimmedPath) {
+    return undefined;
+  }
+  return `/${trimmedPath}`;
+}
+
 /**
  * 动态路由 Hook
  * 从用户菜单中提取页面路由信息,并缓存结果
@@ -25,7 +33,7 @@ export function useDynamicRoutes(): DynamicRoutesResult {
     );
 
     // 默认打开第一个页面
-    const defaultRoute = pages[0]?.path || "/dashboard";
+    const defaultRoute = normalizeRoutePath(pages[0]?.path) ?? "/home";
 
     return {
       pageMenus: pages,

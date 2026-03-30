@@ -13,12 +13,17 @@ import { store } from "@/store";
 import { clearAuth, refreshAccessToken } from "@/store/slices/authSlice";
 
 /** 经过响应拦截器处理后的请求接口 - 直接返回数据而非 AxiosResponse */
+export interface RequestConfig extends AxiosRequestConfig {
+  authToken?: string;
+  skipAuthRefresh?: boolean;
+}
+
 interface RequestInstance extends AxiosInstance {
-  get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T>;
-  post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>;
-  put<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>;
-  delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T>;
-  patch<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>;
+  get<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
+  post<T = unknown>(url: string, data?: unknown, config?: RequestConfig): Promise<T>;
+  put<T = unknown>(url: string, data?: unknown, config?: RequestConfig): Promise<T>;
+  delete<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
+  patch<T = unknown>(url: string, data?: unknown, config?: RequestConfig): Promise<T>;
 }
 
 const request = axios.create({
@@ -29,8 +34,9 @@ const request = axios.create({
 // 请求拦截器
 request.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
+    const requestConfig = config as InternalAxiosRequestConfig & RequestConfig;
     const state = store.getState();
-    const token = state.auth.token;
+    const token = requestConfig.authToken ?? state.auth.token;
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -39,17 +45,39 @@ request.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+type RefreshSubscriber = {
+  resolve: (token: string) => void;
+  reject: (reason?: unknown) => void;
+};
+
 // Token 刷新状态
 let isRefreshing = false;
-let refreshSubscribers: ((token: string) => void)[] = [];
+let refreshSubscribers: RefreshSubscriber[] = [];
 
-function subscribeTokenRefresh(callback: (token: string) => void) {
-  refreshSubscribers.push(callback);
+function subscribeTokenRefresh(
+  resolve: (token: string) => void,
+  reject: (reason?: unknown) => void
+) {
+  refreshSubscribers.push({ resolve, reject });
 }
 
-function onTokenRefreshed(token: string) {
-  refreshSubscribers.forEach((callback) => callback(token));
+function resolveTokenRefresh(token: string) {
+  const subscribers = refreshSubscribers;
   refreshSubscribers = [];
+  subscribers.forEach(({ resolve }) => resolve(token));
+}
+
+function rejectTokenRefresh(reason: unknown) {
+  const subscribers = refreshSubscribers;
+  refreshSubscribers = [];
+  subscribers.forEach(({ reject }) => reject(reason));
+}
+
+function redirectToLogin() {
+  if (typeof window !== "undefined") {
+    // HashRouter 需要通过 hash 跳转，直接改 pathname 会绕过前端路由
+    window.location.hash = "#/login";
+  }
 }
 
 // 响应拦截器
@@ -62,18 +90,24 @@ request.interceptors.response.use(
     return data.data !== undefined ? data.data : data;
   },
   async (error: AxiosError<{ message?: string }>) => {
-    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    const originalRequest = error.config as InternalAxiosRequestConfig &
+      RequestConfig & { _retry?: boolean };
 
     // 401 处理：尝试刷新 token
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+    if (
+      error.response?.status === 401 &&
+      originalRequest &&
+      !originalRequest._retry &&
+      !originalRequest.skipAuthRefresh
+    ) {
       if (isRefreshing) {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
           subscribeTokenRefresh((token: string) => {
             if (originalRequest.headers) {
               originalRequest.headers.Authorization = `Bearer ${token}`;
             }
             resolve(request(originalRequest));
-          });
+          }, reject);
         });
       }
 
@@ -84,20 +118,26 @@ request.interceptors.response.use(
         const resultAction = await store.dispatch(refreshAccessToken());
         if (refreshAccessToken.fulfilled.match(resultAction)) {
           const newToken = resultAction.payload.token;
-          onTokenRefreshed(newToken);
+          resolveTokenRefresh(newToken);
           if (originalRequest.headers) {
             originalRequest.headers.Authorization = `Bearer ${newToken}`;
           }
           return request(originalRequest);
-        } else {
-          store.dispatch(clearAuth());
-          window.location.href = "/login";
-          return Promise.reject(error);
         }
-      } catch {
+
+        const message = resultAction.payload ?? "登录已过期，请重新登录";
+        const refreshError = new Error(message);
+        rejectTokenRefresh(refreshError);
         store.dispatch(clearAuth());
-        window.location.href = "/login";
-        return Promise.reject(error);
+        redirectToLogin();
+        return Promise.reject(refreshError);
+      } catch (refreshError) {
+        const errorToThrow =
+          refreshError instanceof Error ? refreshError : new Error("刷新令牌失败");
+        rejectTokenRefresh(errorToThrow);
+        store.dispatch(clearAuth());
+        redirectToLogin();
+        return Promise.reject(errorToThrow);
       } finally {
         isRefreshing = false;
       }

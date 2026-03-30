@@ -4,7 +4,6 @@
 #include <drogon/HttpAppFramework.h>
 #include <optional>
 #include <string>
-#include <json/json.h>
 
 using namespace drogon;
 using namespace drogon::nosql;
@@ -35,6 +34,7 @@ public:
     /**
      * @brief 获取 Redis 客户端
      */
+    [[nodiscard]]
     RedisClientPtr getClient() const {
         try {
             return AppRedisConfig::useFast()
@@ -95,47 +95,6 @@ public:
             co_return true;
         } catch (const std::exception& e) {
             LOG_ERROR << "Redis SET error for key '" << key << "': " << e.what();
-            co_return false;
-        }
-    }
-
-    /**
-     * @brief 获取 JSON 对象
-     */
-    Task<std::optional<Json::Value>> getJson(const std::string& key) {
-        auto str = co_await get(key);
-        if (!str) {
-            co_return std::nullopt;
-        }
-
-        try {
-            Json::Value json;
-            Json::CharReaderBuilder builder;
-            std::istringstream stream(*str);
-            std::string errs;
-
-            if (Json::parseFromStream(builder, stream, &json, &errs)) {
-                co_return json;
-            }
-            LOG_WARN << "Failed to parse JSON from Redis key '" << key << "': " << errs;
-            co_return std::nullopt;
-        } catch (const std::exception& e) {
-            LOG_ERROR << "Redis getJson error for key '" << key << "': " << e.what();
-            co_return std::nullopt;
-        }
-    }
-
-    /**
-     * @brief 设置 JSON 对象
-     */
-    Task<bool> setJson(const std::string& key, const Json::Value& value, int ttl = 0) {
-        try {
-            Json::StreamWriterBuilder builder;
-            builder["indentation"] = "";
-            std::string jsonStr = Json::writeString(builder, value);
-            co_return co_await set(key, jsonStr, ttl);
-        } catch (const std::exception& e) {
-            LOG_ERROR << "Redis setJson error for key '" << key << "': " << e.what();
             co_return false;
         }
     }

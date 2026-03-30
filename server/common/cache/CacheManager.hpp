@@ -1,7 +1,11 @@
 #pragma once
 
-#include "common/database/RedisService.hpp"
+#include <charconv>
 #include <json/json.h>
+
+#include "common/database/RedisService.hpp"
+#include "modules/system/SystemHelpers.hpp"
+#include <sstream>
 #include <string>
 #include <optional>
 
@@ -16,13 +20,53 @@ private:
     int userMenusTtl_;
     int userRolesTtl_;
 
+    static std::string serializeJson(const Json::Value& value) {
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        return Json::writeString(builder, value);
+    }
+
+    static std::optional<Json::Value> parseJson(const std::string& key,
+                                                const std::string& content) {
+        try {
+            Json::Value json;
+            Json::CharReaderBuilder builder;
+            std::istringstream stream(content);
+            std::string errs;
+
+            if (Json::parseFromStream(builder, stream, &json, &errs)) {
+                return json;
+            }
+
+            LOG_WARN << "Failed to parse JSON from Redis key '" << key << "': " << errs;
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            LOG_ERROR << "Redis JSON parse error for key '" << key << "': " << e.what();
+            return std::nullopt;
+        }
+    }
+
+    static std::optional<int64_t> parseInt64Value(const std::string& key,
+                                                  const std::string& content) {
+        int64_t value = 0;
+        const auto* begin = content.data();
+        const auto* end = content.data() + content.size();
+        auto [ptr, ec] = std::from_chars(begin, end, value);
+        if (ec != std::errc() || ptr != end) {
+            LOG_WARN << "Invalid integer value from Redis key '" << key << "': " << content;
+            return std::nullopt;
+        }
+
+        return value;
+    }
+
 public:
     CacheManager()
         : userSessionTtl_(3600)    // 1小时
         , userMenusTtl_(1800)      // 30分钟
         , userRolesTtl_(3600)      // 1小时
     {
-        auto config = app().getCustomConfig();
+        const auto& config = app().getCustomConfig();
         if (config.isMember("cache")) {
             userSessionTtl_ = config["cache"].get("user_session_ttl", 3600).asInt();
             userMenusTtl_ = config["cache"].get("user_menus_ttl", 1800).asInt();
@@ -35,17 +79,27 @@ public:
     /**
      * @brief 缓存用户会话信息
      */
-    Task<bool> cacheUserSession(int userId, const Json::Value& userInfo) {
+    Task<bool> cacheUserSession(int userId, const SystemHelpers::CurrentUserSummary& userInfo) {
         std::string key = "session:user:" + std::to_string(userId);
-        co_return co_await redis_.setJson(key, userInfo, userSessionTtl_);
+        co_return co_await redis_.set(key, serializeJson(SystemHelpers::currentUserToJson(userInfo)), userSessionTtl_);
     }
 
     /**
      * @brief 获取用户会话信息
      */
-    Task<std::optional<Json::Value>> getUserSession(int userId) {
+    Task<std::optional<SystemHelpers::CurrentUserSummary>> getUserSession(int userId) {
         std::string key = "session:user:" + std::to_string(userId);
-        co_return co_await redis_.getJson(key);
+        auto content = co_await redis_.get(key);
+        if (!content) {
+            co_return std::nullopt;
+        }
+
+        auto userInfo = parseJson(key, *content);
+        if (!userInfo) {
+            co_return std::nullopt;
+        }
+
+        co_return SystemHelpers::currentUserFromJson(*userInfo);
     }
 
     /**
@@ -61,17 +115,27 @@ public:
     /**
      * @brief 缓存用户角色
      */
-    Task<bool> cacheUserRoles(int userId, const Json::Value& roles) {
+    Task<bool> cacheUserRoles(int userId, const std::vector<SystemHelpers::RoleSummary>& roles) {
         std::string key = "user:roles:" + std::to_string(userId);
-        co_return co_await redis_.setJson(key, roles, userRolesTtl_);
+        co_return co_await redis_.set(key, serializeJson(SystemHelpers::rolesToJson(roles)), userRolesTtl_);
     }
 
     /**
      * @brief 获取用户角色
      */
-    Task<std::optional<Json::Value>> getUserRoles(int userId) {
+    Task<std::optional<std::vector<SystemHelpers::RoleSummary>>> getUserRoles(int userId) {
         std::string key = "user:roles:" + std::to_string(userId);
-        co_return co_await redis_.getJson(key);
+        auto content = co_await redis_.get(key);
+        if (!content) {
+            co_return std::nullopt;
+        }
+
+        auto roles = parseJson(key, *content);
+        if (!roles) {
+            co_return std::nullopt;
+        }
+
+        co_return SystemHelpers::rolesFromJson(*roles);
     }
 
     /**
@@ -87,17 +151,27 @@ public:
     /**
      * @brief 缓存用户菜单
      */
-    Task<bool> cacheUserMenus(int userId, const Json::Value& menus) {
+    Task<bool> cacheUserMenus(int userId, const std::vector<SystemHelpers::MenuSummary>& menus) {
         std::string key = "user:menus:" + std::to_string(userId);
-        co_return co_await redis_.setJson(key, menus, userMenusTtl_);
+        co_return co_await redis_.set(key, serializeJson(SystemHelpers::menusToJson(menus)), userMenusTtl_);
     }
 
     /**
      * @brief 获取用户菜单
      */
-    Task<std::optional<Json::Value>> getUserMenus(int userId) {
+    Task<std::optional<std::vector<SystemHelpers::MenuSummary>>> getUserMenus(int userId) {
         std::string key = "user:menus:" + std::to_string(userId);
-        co_return co_await redis_.getJson(key);
+        auto content = co_await redis_.get(key);
+        if (!content) {
+            co_return std::nullopt;
+        }
+
+        auto menus = parseJson(key, *content);
+        if (!menus) {
+            co_return std::nullopt;
+        }
+
+        co_return SystemHelpers::menusFromJson(*menus);
     }
 
     /**
@@ -113,15 +187,25 @@ public:
     /**
      * @brief 缓存所有菜单（超级管理员使用）
      */
-    Task<bool> cacheAllMenus(const Json::Value& menus) {
-        co_return co_await redis_.setJson("menu:all", menus, userMenusTtl_);
+    Task<bool> cacheAllMenus(const std::vector<SystemHelpers::MenuSummary>& menus) {
+        co_return co_await redis_.set("menu:all", serializeJson(SystemHelpers::menusToJson(menus)), userMenusTtl_);
     }
 
     /**
      * @brief 获取所有菜单
      */
-    Task<std::optional<Json::Value>> getAllMenus() {
-        co_return co_await redis_.getJson("menu:all");
+    Task<std::optional<std::vector<SystemHelpers::MenuSummary>>> getAllMenus() {
+        auto content = co_await redis_.get("menu:all");
+        if (!content) {
+            co_return std::nullopt;
+        }
+
+        auto menus = parseJson("menu:all", *content);
+        if (!menus) {
+            co_return std::nullopt;
+        }
+
+        co_return SystemHelpers::menusFromJson(*menus);
     }
 
     /**
@@ -177,7 +261,13 @@ public:
         if (!value) {
             co_return 0;
         }
-        co_return std::stoll(*value);
+
+        auto parsed = parseInt64Value(key, *value);
+        if (!parsed) {
+            co_return 0;
+        }
+
+        co_return *parsed;
     }
 
     // ==================== API 限流 ====================
@@ -186,9 +276,13 @@ public:
      * @brief 检查 API 访问频率
      * @return 当前访问次数
      */
-    Task<int64_t> checkRateLimit(int userId, const std::string& endpoint, [[maybe_unused]] int maxRequests, int windowSeconds) {
+    Task<int64_t> checkRateLimit(int userId, const std::string& endpoint, int maxRequests, int windowSeconds) {
         std::string key = "ratelimit:" + std::to_string(userId) + ":" + endpoint;
         auto count = co_await redis_.incrWithExpire(key, windowSeconds);
+        if (maxRequests > 0 && count > maxRequests) {
+            LOG_WARN << "Rate limit exceeded for key '" << key << "': "
+                     << count << "/" << maxRequests;
+        }
         co_return count;
     }
 

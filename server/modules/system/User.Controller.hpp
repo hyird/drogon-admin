@@ -30,13 +30,9 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:user:query"});
 
-            auto page = Pagination::fromRequest(req);
-            int departmentId = 0;
-            auto deptStr = req->getParameter("departmentId");
-            if (!deptStr.empty()) try { departmentId = std::stoi(deptStr); } catch (...) {}
-
-            auto [items, total] = co_await service_.list(page, req->getParameter("status"), departmentId);
-            co_return Pagination::buildResponse(items, total, page.page, page.pageSize);
+            auto query = SystemRequests::makeUserListQuery(req);
+            auto [items, total] = co_await service_.list(query);
+            co_return Pagination::buildResponse(items, SystemHelpers::userListItemsToJson, total, query.pagination.page, query.pagination.pageSize);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -50,7 +46,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:user:query"});
 
-            co_return Response::ok(co_await service_.detail(id));
+            co_return Response::ok(co_await service_.detail(id), SystemHelpers::userDetailToJson);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -64,15 +60,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:user:add"});
 
-            auto json = req->getJsonObject();
-            if (!json) co_return Response::badRequest("请求体格式错误");
-            if (!json->isMember("username") || (*json)["username"].asString().empty())
-                co_return Response::badRequest("用户名不能为空");
-            if (!json->isMember("password") || (*json)["password"].asString().empty())
-                co_return Response::badRequest("密码不能为空");
-            if ((*json)["password"].asString().length() < 6)
-                co_return Response::badRequest("密码长度不能小于6位");
-            co_await service_.create(*json);
+            co_await service_.create(SystemRequests::makeUserCreateRequest(req));
             co_return Response::created("创建成功");
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -87,11 +75,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:user:edit"});
 
-            auto json = req->getJsonObject();
-            if (!json) co_return Response::badRequest("请求体格式错误");
-            if (json->isMember("password") && !(*json)["password"].asString().empty() && (*json)["password"].asString().length() < 6)
-                co_return Response::badRequest("密码长度不能小于6位");
-            co_await service_.update(id, *json);
+            co_await service_.update(id, SystemRequests::makeUserUpdateRequest(req));
             co_return Response::updated("更新成功");
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -106,8 +90,9 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:user:delete"});
 
-            if (userId == id)
-                co_return Response::badRequest("不能删除当前登录用户");
+            if (userId == id) {
+                throw ValidationException("不能删除当前登录用户");
+            }
             co_await service_.remove(id);
             co_return Response::deleted("删除成功");
         } catch (const AppException& e) {

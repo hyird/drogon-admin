@@ -10,6 +10,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuthStore, useTabsStore } from "@/store/hooks";
+import { store } from "@/store";
+import { clearAuth as clearAuthAction } from "@/store/slices/authSlice";
 import { buildMenuTree } from "@/utils";
 import type { Menu } from "@/types";
 import { renderIcon } from "@/utils/icon";
@@ -38,20 +40,23 @@ export default function AdminLayout() {
 
   // 有 token 但完全没有 user 缓存时才显示 loading
   const isInitialLoading = !!token && !user;
+  const hadUserOnMountRef = useRef(Boolean(user));
 
   // 启用心跳检测
   useHeartbeat({ interval: 5 * 60 * 1000, enabled: !!token });
 
   // 后台静默刷新用户数据
   useEffect(() => {
-    if (token && !hasRefreshed.current) {
-      hasRefreshed.current = true;
-      refreshUser()
-        .unwrap()
-        .catch(() => {
-          // 刷新失败会自动清除 auth，AuthGuard 会自动重定向到登录页
-        });
+    if (!token || !hadUserOnMountRef.current || hasRefreshed.current) {
+      return;
     }
+
+    hasRefreshed.current = true;
+    refreshUser()
+      .unwrap()
+      .catch(() => {
+        store.dispatch(clearAuthAction());
+      });
   }, [token, refreshUser]);
 
   // 路由变化时关闭移动端抽屉

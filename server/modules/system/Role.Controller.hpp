@@ -31,9 +31,9 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:role:query"});
 
-            auto page = Pagination::fromRequest(req);
-            auto [items, total] = co_await service_.list(page, req->getParameter("status"));
-            co_return Pagination::buildResponse(items, total, page.page, page.pageSize);
+            auto query = SystemRequests::makeRoleListQuery(req);
+            auto [items, total] = co_await service_.list(query);
+            co_return Pagination::buildResponse(items, SystemHelpers::roleListItemsToJson, total, query.pagination.page, query.pagination.pageSize);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -47,7 +47,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:role:query"});
 
-            co_return Response::ok(co_await service_.all());
+            co_return Response::ok(co_await service_.all(), SystemHelpers::rolesToJson);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -61,7 +61,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:role:query"});
 
-            co_return Response::ok(co_await service_.detail(id));
+            co_return Response::ok(co_await service_.detail(id), SystemHelpers::roleDetailToJson);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -75,13 +75,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:role:add"});
 
-            auto json = req->getJsonObject();
-            if (!json) co_return Response::badRequest("请求体格式错误");
-            if (!json->isMember("name") || (*json)["name"].asString().empty())
-                co_return Response::badRequest("角色名称不能为空");
-            if (!json->isMember("code") || (*json)["code"].asString().empty())
-                co_return Response::badRequest("角色编码不能为空");
-            co_await service_.create(*json);
+            co_await service_.create(SystemRequests::makeRoleCreateRequest(req));
             co_return Response::created("创建成功");
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -96,9 +90,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:role:edit"});
 
-            auto json = req->getJsonObject();
-            if (!json) co_return Response::badRequest("请求体格式错误");
-            co_await service_.update(id, *json);
+            co_await service_.update(id, SystemRequests::makeRoleUpdateRequest(req));
             co_return Response::updated("更新成功");
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());

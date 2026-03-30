@@ -30,8 +30,9 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:menu:query"});
 
-            auto items = co_await service_.list(req->getParameter("keyword"), req->getParameter("status"));
-            co_return Response::ok(items);
+            auto query = SystemRequests::makeMenuListQuery(req);
+            auto items = co_await service_.list(query);
+            co_return Response::ok(items, SystemHelpers::menuRecordItemsToJson);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -45,8 +46,11 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:menu:query"});
 
-            auto tree = co_await service_.tree(req->getParameter("status"));
-            co_return Response::ok(tree);
+            auto query = SystemRequests::makeMenuTreeQuery(req);
+            auto tree = co_await service_.tree(query);
+            co_return Response::ok(tree, [](const auto& nodes) {
+                return TreeBuilder::toJson(nodes, [](const auto& item) { return SystemHelpers::menuRecordToJson(item); });
+            });
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -60,7 +64,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:menu:query"});
 
-            co_return Response::ok(co_await service_.detail(id));
+            co_return Response::ok(co_await service_.detail(id), SystemHelpers::menuRecordToJson);
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
         } catch (const std::exception& e) {
@@ -74,11 +78,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:menu:add"});
 
-            auto json = req->getJsonObject();
-            if (!json) co_return Response::badRequest("请求体格式错误");
-            if (!json->isMember("name") || (*json)["name"].asString().empty())
-                co_return Response::badRequest("菜单名称不能为空");
-            co_await service_.create(*json);
+            co_await service_.create(SystemRequests::makeMenuCreateRequest(req));
             co_return Response::created("创建成功");
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());
@@ -93,9 +93,7 @@ public:
             int userId = req->attributes()->get<int>("userId");
             co_await PermissionChecker::checkPermission(userId, {"system:menu:edit"});
 
-            auto json = req->getJsonObject();
-            if (!json) co_return Response::badRequest("请求体格式错误");
-            co_await service_.update(id, *json);
+            co_await service_.update(id, SystemRequests::makeMenuUpdateRequest(req));
             co_return Response::updated("更新成功");
         } catch (const AppException& e) {
             co_return Response::error(e.getCode(), e.getMessage(), e.getStatus());

@@ -2,6 +2,7 @@
 
 #include <drogon/HttpFilter.h>
 #include <chrono>
+#include "common/utils/AuthContext.hpp"
 
 using namespace drogon;
 
@@ -40,9 +41,9 @@ private:
     void logRequest(const HttpRequestPtr& req) {
         // 获取用户名（已登录用户）
         std::string username = "-";
-        try {
-            username = req->attributes()->get<std::string>("username");
-        } catch (...) {}
+        if (auto claims = AuthContext::tryGetAuthClaims(req); claims) {
+            username = claims->username;
+        }
 
         // 计算耗时
         std::string duration = "-";

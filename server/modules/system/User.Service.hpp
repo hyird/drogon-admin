@@ -9,6 +9,9 @@
 #include "common/utils/AppException.hpp"
 #include "common/utils/FieldHelper.hpp"
 #include "common/utils/TimestampHelper.hpp"
+#include "SystemHelpers.hpp"
+#include "SystemConstants.hpp"
+#include "SystemRequests.hpp"
 
 using namespace drogon;
 
@@ -21,60 +24,69 @@ private:
     CacheManager cacheManager_;
 
 public:
-    Task<std::tuple<Json::Value, int>> list(const Pagination& page, const std::string& status = "", int departmentId = 0) {
+    Task<std::tuple<std::vector<SystemHelpers::UserListItemSummary>, int>> list(const SystemRequests::UserListQuery& query) {
         QueryBuilder qb;
         qb.notDeleted("u.deletedAt");
-        if (!page.keyword.empty()) qb.likeAny({"u.username", "u.nickname", "u.phone", "u.email"}, page.keyword);
-        if (!status.empty()) qb.eq("u.status", status);
-        if (departmentId > 0) qb.eq("u.departmentId", std::to_string(departmentId));
+        if (!query.pagination.keyword.empty()) {
+            qb.likeAny({"u.username", "u.nickname", "u.phone", "u.email"}, query.pagination.keyword);
+        }
+        if (query.status) {
+            qb.eq("u.status", *query.status);
+        }
+        if (query.departmentId) {
+            qb.eq("u.departmentId", std::to_string(*query.departmentId));
+        }
 
         auto countResult = co_await dbService_.execSqlCoro("SELECT COUNT(*) as count FROM sys_user u" + qb.whereClause(), qb.params());
         int total = countResult.empty() ? 0 : F_INT(countResult[0]["count"]);
 
-        std::string sql = "SELECT u.*, d.name as departmentName FROM sys_user u LEFT JOIN sys_department d ON u.departmentId = d.id AND d.deletedAt IS NULL" + qb.whereClause() + " ORDER BY u.id ASC" + page.limitClause();
+        std::string sql = "SELECT u.*, d.name as departmentName FROM sys_user u LEFT JOIN sys_department d ON u.departmentId = d.id AND d.deletedAt IS NULL" + qb.whereClause() + " ORDER BY u.id ASC" + query.pagination.limitClause();
         auto result = co_await dbService_.execSqlCoro(sql, qb.params());
 
-        Json::Value items(Json::arrayValue);
+        std::vector<SystemHelpers::UserListItemSummary> items;
+        items.reserve(result.size());
         for (const auto& row : result) {
-            auto item = rowToJson(row);
-            item["roles"] = co_await getUserRoles(F_INT(row["id"]));
-            items.append(item);
+            SystemHelpers::UserListItemSummary item;
+            item.user = SystemHelpers::userRecordFromRow(row);
+            item.roles = co_await getUserRoles(F_INT(row["id"]));
+            items.push_back(std::move(item));
         }
         co_return std::make_tuple(items, total);
     }
 
-    Task<Json::Value> detail(int id) {
+    Task<SystemHelpers::UserDetailSummary> detail(int id) {
         std::string sql = "SELECT u.*, d.name as departmentName FROM sys_user u LEFT JOIN sys_department d ON u.departmentId = d.id AND d.deletedAt IS NULL WHERE u.id = ? AND u.deletedAt IS NULL";
         auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(id)});
         if (result.empty()) throw NotFoundException("用户不存在");
-        auto item = rowToJson(result[0]);
-        item["roles"] = co_await getUserRoles(id);
-        item["roleIds"] = co_await getUserRoleIds(id);
+        SystemHelpers::UserDetailSummary item;
+        item.user = SystemHelpers::userRecordFromRow(result[0]);
+        item.roles = co_await getUserRoles(id);
+        item.roleIds = co_await getUserRoleIds(id);
         co_return item;
     }
 
-    Task<void> create(const Json::Value& data) {
-        std::string username = data.get("username", "").asString();
+    Task<void> create(const SystemRequests::UserCreateRequest& data) {
+        const std::string& username = data.username;
         co_await checkUsernameUnique(username);
 
         auto tx = co_await TransactionGuard::create(dbService_);
-        std::string passwordHash = PasswordUtils::hashPassword(data.get("password", "").asString());
+        std::string passwordHash = PasswordUtils::hashPassword(data.password);
 
         co_await tx.execSqlCoro(
             "INSERT INTO sys_user (username, passwordHash, nickname, phone, email, departmentId, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             {
-                username, passwordHash, data.get("nickname", "").asString(),
-                data.get("phone", "").asString(), data.get("email", "").asString(),
-                data.get("departmentId", 0).isNull() ? "0" : std::to_string(data["departmentId"].asInt()),
-                data.get("status", "enabled").asString(), TimestampHelper::now()
+                username, passwordHash, data.nickname.value_or(""),
+                data.phone.value_or(""), data.email.value_or(""),
+                data.departmentId.has_value() ? std::to_string(*data.departmentId) : "0",
+                data.status, TimestampHelper::now()
             }
         );
 
         auto lastIdResult = co_await tx.execSqlCoro("SELECT LAST_INSERT_ID() as id");
         int userId = F_INT(lastIdResult[0]["id"]);
 
-        if (data.isMember("roleIds") && data["roleIds"].isArray()) {
-            co_await syncRoles(tx, userId, data["roleIds"]);
+        if (!data.roleIds.empty()) {
+            co_await syncRoles(tx, userId, data.roleIds);
         }
 
         // 提交成功后清除缓存
@@ -85,7 +97,7 @@ public:
         co_await tx.commit();
     }
 
-    Task<void> update(int id, const Json::Value& data) {
+    Task<void> update(int id, const SystemRequests::UserUpdateRequest& data) {
         co_await detail(id);
         co_await checkNotBuiltinAdmin(id);
 
@@ -94,13 +106,18 @@ public:
         std::vector<std::string> setClauses, params;
         auto addField = [&setClauses, &params](const std::string& f, const std::string& v) { setClauses.push_back(f + " = ?"); params.push_back(v); };
 
-        if (data.isMember("nickname")) addField("nickname", data["nickname"].asString());
-        if (data.isMember("phone")) addField("phone", data["phone"].asString());
-        if (data.isMember("email")) addField("email", data["email"].asString());
-        if (data.isMember("departmentId")) addField("departmentId", data["departmentId"].isNull() ? "0" : std::to_string(data["departmentId"].asInt()));
-        if (data.isMember("status")) addField("status", data["status"].asString());
-        if (data.isMember("password") && !data["password"].asString().empty())
-            addField("passwordHash", PasswordUtils::hashPassword(data["password"].asString()));
+        if (data.nickname) addField("nickname", *data.nickname);
+        if (data.phone) addField("phone", *data.phone);
+        if (data.email) addField("email", *data.email);
+        if (data.departmentId.has_value()) {
+            if (data.departmentId->has_value()) {
+                addField("departmentId", std::to_string(**data.departmentId));
+            } else {
+                addField("departmentId", "0");
+            }
+        }
+        if (data.status) addField("status", *data.status);
+        if (data.password) addField("passwordHash", PasswordUtils::hashPassword(*data.password));
 
         if (!setClauses.empty()) {
             addField("updatedAt", TimestampHelper::now());
@@ -111,8 +128,8 @@ public:
             co_await tx.execSqlCoro(sql, params);
         }
 
-        if (data.isMember("roleIds") && data["roleIds"].isArray()) {
-            co_await syncRoles(tx, id, data["roleIds"]);
+        if (data.roleIds) {
+            co_await syncRoles(tx, id, *data.roleIds);
         }
 
         // 提交成功后清除用户缓存
@@ -150,62 +167,45 @@ private:
 
     Task<void> checkNotBuiltinAdmin(int userId) {
         auto result = co_await dbService_.execSqlCoro(
-            "SELECT id FROM sys_user WHERE id = ? AND username = 'admin' AND deletedAt IS NULL",
-            {std::to_string(userId)});
+            "SELECT id FROM sys_user WHERE id = ? AND username = ? AND deletedAt IS NULL",
+            {std::to_string(userId), std::string(SystemConstants::DEFAULT_ADMIN_USERNAME)});
         if (!result.empty()) throw ForbiddenException("不能编辑或删除内建管理员账户");
     }
 
-    Task<Json::Value> getUserRoles(int userId) {
+    Task<std::vector<SystemHelpers::RoleSummary>> getUserRoles(int userId) {
         auto result = co_await dbService_.execSqlCoro(
             "SELECT r.id, r.name, r.code FROM sys_role r INNER JOIN sys_user_role ur ON r.id = ur.roleId WHERE ur.userId = ? AND r.deletedAt IS NULL",
             {std::to_string(userId)});
-        Json::Value roles(Json::arrayValue);
+        std::vector<SystemHelpers::RoleSummary> roles;
+        roles.reserve(result.size());
         for (const auto& row : result) {
-            Json::Value role;
-            role["id"] = F_INT(row["id"]);
-            role["name"] = F_STR(row["name"]);
-            role["code"] = F_STR(row["code"]);
-            roles.append(role);
+            roles.push_back(SystemHelpers::roleSummaryFromRow(row));
         }
         co_return roles;
     }
 
-    Task<Json::Value> getUserRoleIds(int userId) {
+    Task<std::vector<int>> getUserRoleIds(int userId) {
         auto result = co_await dbService_.execSqlCoro("SELECT roleId FROM sys_user_role WHERE userId = ?", {std::to_string(userId)});
-        Json::Value roleIds(Json::arrayValue);
-        for (const auto& row : result) roleIds.append(F_INT(row["roleId"]));
+        std::vector<int> roleIds;
+        roleIds.reserve(result.size());
+        for (const auto& row : result) roleIds.push_back(F_INT(row["roleId"]));
         co_return roleIds;
     }
 
-    Task<void> syncRoles(TransactionGuard& tx, int userId, const Json::Value& roleIds) {
+    Task<void> syncRoles(TransactionGuard& tx, int userId, const std::vector<int>& roleIds) {
         co_await tx.execSqlCoro("DELETE FROM sys_user_role WHERE userId = ?", {std::to_string(userId)});
 
-        if (roleIds.isArray() && !roleIds.empty()) {
+        if (!roleIds.empty()) {
             std::string sql = "INSERT INTO sys_user_role (userId, roleId) VALUES ";
             std::vector<std::string> valueParts, params;
-            for (const auto& roleId : roleIds) {
+            for (int roleId : roleIds) {
                 valueParts.push_back("(?, ?)");
                 params.push_back(std::to_string(userId));
-                params.push_back(std::to_string(roleId.asInt()));
+                params.push_back(std::to_string(roleId));
             }
             sql += valueParts[0];
             for (size_t i = 1; i < valueParts.size(); ++i) sql += ", " + valueParts[i];
             co_await tx.execSqlCoro(sql, params);
         }
-    }
-
-    Json::Value rowToJson(const drogon::orm::Row& row) {
-        Json::Value json;
-        json["id"] = F_INT(row["id"]);
-        json["username"] = F_STR(row["username"]);
-        json["nickname"] = F_STR_DEF(row["nickname"], "");
-        json["phone"] = F_STR_DEF(row["phone"], "");
-        json["email"] = F_STR_DEF(row["email"], "");
-        json["departmentId"] = F_INT_DEF(row["departmentId"], 0);
-        try { json["departmentName"] = F_STR_DEF(row["departmentName"], ""); } catch (...) { json["departmentName"] = ""; }
-        json["status"] = F_STR_DEF(row["status"], "enabled");
-        json["createdAt"] = F_STR_DEF(row["createdAt"], "");
-        json["updatedAt"] = F_STR_DEF(row["updatedAt"], "");
-        return json;
     }
 };

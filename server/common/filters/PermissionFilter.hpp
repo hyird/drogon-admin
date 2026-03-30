@@ -6,6 +6,7 @@
 #include "common/utils/AppException.hpp"
 #include "common/utils/FieldHelper.hpp"
 #include "common/database/DatabaseService.hpp"
+#include "modules/system/SystemConstants.hpp"
 
 using namespace drogon;
 using namespace drogon::orm;
@@ -23,17 +24,20 @@ public:
             co_return true;
         }
 
-        auto dbClient = AppDbConfig::useFast()
-            ? app().getFastDbClient("default")
-            : app().getDbClient("default");
+        DatabaseService dbService;
+        auto dbClient = dbService.getClient();
+        if (!dbClient) {
+            LOG_ERROR << "Database client is not available for permission check";
+            co_return false;
+        }
 
         // 检查是否是超级管理员
         auto superadminResult = co_await dbClient->execSqlCoro(buildSql(R"(
             SELECT COUNT(*) as count
             FROM sys_user_role ur
             INNER JOIN sys_role r ON ur.roleId = r.id
-            WHERE ur.userId = ? AND r.code = 'superadmin' AND r.deletedAt IS NULL
-        )", {std::to_string(userId)}));
+            WHERE ur.userId = ? AND r.code = ? AND r.deletedAt IS NULL
+        )", {std::to_string(userId), std::string(SystemConstants::SUPERADMIN_ROLE_CODE)}));
 
         if (!superadminResult.empty() && F_INT(superadminResult[0]["count"]) > 0) {
             co_return true;

@@ -11,81 +11,33 @@ using namespace drogon;
  */
 class Response {
 public:
-    static HttpResponsePtr ok(const Json::Value &data = Json::Value::null,
-                               const std::string &message = "Success") {
-        Json::Value json;
-        json["code"] = 0;
-        json["message"] = message;
-        if (!data.isNull()) {
-            json["data"] = data;
-        }
-
-        auto resp = HttpResponse::newHttpJsonResponse(json);
-        resp->setStatusCode(k200OK);
-        return resp;
+    template <typename T, typename ToJson>
+    static HttpResponsePtr ok(const T& data,
+                              ToJson convert,
+                              const std::string& message = "Success") {
+        return buildResponse(0, message, convert(data), k200OK);
     }
 
-    static HttpResponsePtr page(const Json::Value &items,
-                                  int total,
-                                  int page,
-                                  int pageSize) {
-        Json::Value data;
-        data["list"] = items;
-        data["total"] = total;
-        data["page"] = page;
-        data["pageSize"] = pageSize;
-        data["totalPages"] = (total + pageSize - 1) / pageSize;
-
-        Json::Value json;
-        json["code"] = 0;
-        json["message"] = "Success";
-        json["data"] = data;
-
-        auto resp = HttpResponse::newHttpJsonResponse(json);
-        resp->setStatusCode(k200OK);
-        return resp;
+    static HttpResponsePtr success(const std::string& message = "Success") {
+        return buildResponse(0, message, k200OK);
     }
 
     static HttpResponsePtr created(const std::string &message = "创建成功") {
-        Json::Value json;
-        json["code"] = 0;
-        json["message"] = message;
-
-        auto resp = HttpResponse::newHttpJsonResponse(json);
-        resp->setStatusCode(k201Created);
-        return resp;
+        return buildResponse(0, message, k201Created);
     }
 
     static HttpResponsePtr updated(const std::string &message = "更新成功") {
-        Json::Value json;
-        json["code"] = 0;
-        json["message"] = message;
-
-        auto resp = HttpResponse::newHttpJsonResponse(json);
-        resp->setStatusCode(k200OK);
-        return resp;
+        return buildResponse(0, message, k200OK);
     }
 
     static HttpResponsePtr deleted(const std::string &message = "删除成功") {
-        Json::Value json;
-        json["code"] = 0;
-        json["message"] = message;
-
-        auto resp = HttpResponse::newHttpJsonResponse(json);
-        resp->setStatusCode(k200OK);
-        return resp;
+        return buildResponse(0, message, k200OK);
     }
 
     static HttpResponsePtr error(int code,
                                    const std::string &message,
                                    HttpStatusCode status = k400BadRequest) {
-        Json::Value json;
-        json["code"] = code;
-        json["message"] = message;
-
-        auto resp = HttpResponse::newHttpJsonResponse(json);
-        resp->setStatusCode(status);
-        return resp;
+        return buildResponse(code, message, status);
     }
 
     static HttpResponsePtr unauthorized(const std::string &message = "未授权访问") {
@@ -106,5 +58,33 @@ public:
 
     static HttpResponsePtr internalError(const std::string &message = "服务器内部错误") {
         return error(5000, message, k500InternalServerError);
+    }
+
+private:
+    static HttpResponsePtr buildResponse(int code,
+                                         const std::string& message,
+                                         HttpStatusCode status) {
+        Json::Value json;
+        json["code"] = code;
+        json["message"] = message;
+        auto resp = HttpResponse::newHttpJsonResponse(json);
+        resp->setStatusCode(status);
+        return resp;
+    }
+
+    static HttpResponsePtr buildResponse(int code,
+                                         const std::string& message,
+                                         const Json::Value& data,
+                                         HttpStatusCode status) {
+        Json::Value json;
+        json["code"] = code;
+        json["message"] = message;
+        if (!data.isNull()) {
+            json["data"] = data;
+        }
+
+        auto resp = HttpResponse::newHttpJsonResponse(json);
+        resp->setStatusCode(status);
+        return resp;
     }
 };

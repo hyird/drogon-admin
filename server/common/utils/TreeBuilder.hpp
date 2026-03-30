@@ -1,144 +1,104 @@
 #pragma once
 
 #include <json/json.h>
-#include <vector>
-#include <unordered_map>
+#include <algorithm>
 #include <functional>
+#include <unordered_map>
+#include <vector>
 
 /**
  * @brief 树形结构构建工具
  */
 class TreeBuilder {
 public:
-    static Json::Value build(const Json::Value& items,
-                              const std::string& idField = "id",
-                              const std::string& parentField = "parentId",
-                              const std::string& childrenField = "children") {
-        if (!items.isArray()) {
-            return Json::Value(Json::arrayValue);
+    template <typename T>
+    struct TreeNode {
+        T value;
+        std::vector<TreeNode<T>> children;
+    };
+
+    template <typename T, typename GetId, typename GetParentId>
+    static std::vector<TreeNode<T>> build(const std::vector<T>& items,
+                                          GetId getId,
+                                          GetParentId getParentId) {
+        if (items.empty()) {
+            return {};
         }
 
-        std::unordered_map<int, Json::Value> itemMap;
+        std::unordered_map<int, const T*> itemMap;
+        std::unordered_map<int, std::vector<const T*>> childrenByParent;
+        std::vector<const T*> roots;
+        itemMap.reserve(items.size());
+        childrenByParent.reserve(items.size());
+        roots.reserve(items.size());
+
         for (const auto& item : items) {
-            int id = item[idField].asInt();
-            itemMap[id] = item;
+            itemMap[getId(item)] = &item;
         }
 
-        Json::Value roots(Json::arrayValue);
-
-        for (auto& [id, item] : itemMap) {
-            int parentId = 0;
-            if (item.isMember(parentField) && !item[parentField].isNull()) {
-                parentId = item[parentField].asInt();
-            }
-
+        for (const auto& item : items) {
+            const int parentId = getParentId(item);
             if (parentId == 0 || itemMap.find(parentId) == itemMap.end()) {
-                roots.append(item);
+                roots.push_back(&item);
             } else {
-                if (!itemMap[parentId].isMember(childrenField)) {
-                    itemMap[parentId][childrenField] = Json::Value(Json::arrayValue);
-                }
-                itemMap[parentId][childrenField].append(item);
+                childrenByParent[parentId].push_back(&item);
             }
         }
 
-        std::function<void(Json::Value&)> attachChildren;
-        attachChildren = [&itemMap, &idField, &childrenField, &attachChildren](Json::Value& node) {
-            int id = node[idField].asInt();
-            if (itemMap[id].isMember(childrenField)) {
-                node[childrenField] = itemMap[id][childrenField];
-                for (auto& child : node[childrenField]) {
-                    attachChildren(child);
+        std::function<TreeNode<T>(const T*)> buildNode;
+        buildNode = [&childrenByParent, &getId, &buildNode](const T* item) -> TreeNode<T> {
+            TreeNode<T> node;
+            node.value = *item;
+
+            const int id = getId(*item);
+            auto childrenIt = childrenByParent.find(id);
+            if (childrenIt != childrenByParent.end()) {
+                node.children.reserve(childrenIt->second.size());
+                for (const T* child : childrenIt->second) {
+                    node.children.push_back(buildNode(child));
                 }
             }
+
+            return node;
         };
 
-        for (auto& root : roots) {
-            attachChildren(root);
+        std::vector<TreeNode<T>> result;
+        result.reserve(roots.size());
+        for (const T* root : roots) {
+            result.push_back(buildNode(root));
         }
 
-        return roots;
+        return result;
     }
 
-    static void sort(Json::Value& tree,
-                      const std::string& sortField = "order",
-                      bool ascending = true) {
-        if (!tree.isArray()) return;
-
-        std::vector<Json::Value> items;
-        for (const auto& item : tree) {
-            items.push_back(item);
-        }
-
-        std::sort(items.begin(), items.end(),
-            [&sortField, ascending](const Json::Value& a, const Json::Value& b) {
-                int valA = a.isMember(sortField) ? a[sortField].asInt() : 0;
-                int valB = b.isMember(sortField) ? b[sortField].asInt() : 0;
+    template <typename T, typename GetOrder>
+    static void sort(std::vector<TreeNode<T>>& tree,
+                     GetOrder getOrder,
+                     bool ascending = true) {
+        std::sort(tree.begin(), tree.end(),
+            [&getOrder, ascending](const TreeNode<T>& a, const TreeNode<T>& b) {
+                int valA = getOrder(a.value);
+                int valB = getOrder(b.value);
                 return ascending ? (valA < valB) : (valA > valB);
             });
 
-        tree = Json::Value(Json::arrayValue);
-        for (auto& item : items) {
-            if (item.isMember("children") && item["children"].isArray()) {
-                sort(item["children"], sortField, ascending);
-            }
-            tree.append(item);
+        for (auto& node : tree) {
+            sort(node.children, getOrder, ascending);
         }
     }
 
-    static Json::Value filter(const Json::Value& tree,
-                               std::function<bool(const Json::Value&)> predicate) {
+    template <typename T, typename ToJson>
+    static Json::Value toJson(const std::vector<TreeNode<T>>& tree,
+                              ToJson convert,
+                              const std::string& childrenField = "children") {
         Json::Value result(Json::arrayValue);
-
-        if (!tree.isArray()) return result;
-
         for (const auto& node : tree) {
-            if (predicate(node)) {
-                Json::Value newNode = node;
-                if (node.isMember("children") && node["children"].isArray()) {
-                    newNode["children"] = filter(node["children"], predicate);
-                }
-                result.append(newNode);
+            Json::Value json = convert(node.value);
+            if (!node.children.empty()) {
+                json[childrenField] = toJson(node.children, convert, childrenField);
             }
+            result.append(json);
         }
-
-        return result;
-    }
-
-    static std::vector<int> getLeafIds(const Json::Value& tree,
-                                         const std::string& idField = "id") {
-        std::vector<int> result;
-
-        if (!tree.isArray()) return result;
-
-        for (const auto& node : tree) {
-            if (!node.isMember("children") ||
-                !node["children"].isArray() ||
-                node["children"].empty()) {
-                result.push_back(node[idField].asInt());
-            } else {
-                auto childLeafs = getLeafIds(node["children"], idField);
-                result.insert(result.end(), childLeafs.begin(), childLeafs.end());
-            }
-        }
-
-        return result;
-    }
-
-    static std::vector<int> getAllIds(const Json::Value& tree,
-                                        const std::string& idField = "id") {
-        std::vector<int> result;
-
-        if (!tree.isArray()) return result;
-
-        for (const auto& node : tree) {
-            result.push_back(node[idField].asInt());
-            if (node.isMember("children") && node["children"].isArray()) {
-                auto childIds = getAllIds(node["children"], idField);
-                result.insert(result.end(), childIds.begin(), childIds.end());
-            }
-        }
-
         return result;
     }
 };

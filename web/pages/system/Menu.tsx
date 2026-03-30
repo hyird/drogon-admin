@@ -29,21 +29,9 @@ import { StatusTag } from "@/components/StatusTag";
 import { getRegisteredPages, getRegisteredPermissions, getPageConfig } from "@/config/registry";
 import DynamicIcon from "@/components/DynamicIcon";
 import { PageContainer } from "@/components/PageContainer";
+import { menuFormSchema, validateWithZod, type MenuFormValues } from "@/validation";
 
 const { Search } = Input;
-
-interface MenuFormValues {
-  id?: number;
-  name: string;
-  pathSegment?: string;
-  component?: string;
-  icon?: string;
-  parentId?: number | null;
-  order?: number;
-  type: Menu.Type;
-  status: Menu.Status;
-  permissionCode?: string;
-}
 
 function typeTag(type: Menu.Type) {
   const config = MenuTypeMap[type];
@@ -290,7 +278,10 @@ const SystemMenuPage = () => {
   };
 
   const onFinish = (values: MenuFormValues) => {
-    saveMutation.mutate(values);
+    const parsed = validateWithZod(form, menuFormSchema, values);
+    if (!parsed) return;
+
+    saveMutation.mutate(parsed);
   };
 
   // 无查询权限时显示提示
@@ -434,7 +425,7 @@ const SystemMenuPage = () => {
             <Input />
           </Form.Item>
 
-          <Form.Item label="名称" name="name" rules={[{ required: true, message: "请输入名称" }]}>
+          <Form.Item label="名称" name="name" required>
             <Input placeholder="菜单名称 / 页面标题 / 按钮名称" />
           </Form.Item>
 
@@ -447,7 +438,7 @@ const SystemMenuPage = () => {
             />
           </Form.Item>
 
-          <Form.Item label="类型" name="type" rules={[{ required: true, message: "请选择类型" }]}>
+          <Form.Item label="类型" name="type" required>
             <Select>
               {availableTypes.map((t) => (
                 <Select.Option key={t} value={t}>
@@ -458,35 +449,13 @@ const SystemMenuPage = () => {
           </Form.Item>
 
           {(watchType === "menu" || watchType === "page") && (
-            <Form.Item
-              label="路径片段"
-              name="pathSegment"
-              rules={
-                watchType === "page"
-                  ? [
-                      {
-                        required: true,
-                        message: "页面必须配置路径片段",
-                      },
-                    ]
-                  : []
-              }
-            >
+            <Form.Item label="路径片段" name="pathSegment" required={watchType === "page"}>
               <Input placeholder="例如：system / user / menu（不必带父路径）" />
             </Form.Item>
           )}
 
           {watchType === "page" && (
-            <Form.Item
-              label="组件标识"
-              name="component"
-              rules={[
-                {
-                  required: true,
-                  message: "页面必须配置组件标识",
-                },
-              ]}
-            >
+            <Form.Item label="组件标识" name="component" required>
               <Select
                 showSearch
                 allowClear
@@ -510,16 +479,7 @@ const SystemMenuPage = () => {
           )}
 
           {watchType === "button" && (
-            <Form.Item
-              label="权限标识"
-              name="permissionCode"
-              rules={[
-                {
-                  required: true,
-                  message: "按钮必须配置权限标识",
-                },
-              ]}
-            >
+            <Form.Item label="权限标识" name="permissionCode" required>
               <Select
                 showSearch
                 allowClear
@@ -566,7 +526,7 @@ const SystemMenuPage = () => {
           <Form.Item label="排序" name="order">
             <InputNumber style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item label="状态" name="status" rules={[{ required: true }]}>
+          <Form.Item label="状态" name="status" required>
             <Select>
               <Select.Option value="enabled">启用</Select.Option>
               <Select.Option value="disabled">禁用</Select.Option>

@@ -6,6 +6,7 @@
 #include "common/utils/Response.hpp"
 #include "common/utils/StringUtils.hpp"
 #include "common/cache/CacheManager.hpp"
+#include "modules/system/SystemHelpers.hpp"
 
 using namespace drogon;
 
@@ -54,10 +55,10 @@ public:
                 }
 
                 // 验证 Token
-                Json::Value payload = jwtUtils_->verify(token);
+                auto claims = jwtUtils_->verify(token, SystemHelpers::authTokenClaimsFromJson);
 
-                req->attributes()->insert("userId", payload["userId"].asInt());
-                req->attributes()->insert("username", payload["username"].asString());
+                req->attributes()->insert("authClaims", claims);
+                req->attributes()->insert("userId", claims.userId);
 
                 fccb();
 

@@ -68,6 +68,9 @@ private:
 
         BIO_set_flags(bioChain.get(), BIO_FLAGS_BASE64_NO_NL);
         int decodedLength = BIO_read(bioChain.get(), buffer.data(), static_cast<int>(input.length()));
+        if (decodedLength <= 0) {
+            throw AuthException::TokenInvalid();
+        }
 
         return std::string(buffer.data(), decodedLength);
     }
@@ -91,7 +94,18 @@ public:
     JwtUtils(std::string secret, int expiresIn = 3600)
         : secret_(std::move(secret)), expiresIn_(expiresIn) {}
 
-    std::string sign(const Json::Value& payload) const {
+    template <typename Payload, typename ToJson>
+    std::string sign(const Payload& payload, ToJson convert) const {
+        return signJson(convert(payload));
+    }
+
+    template <typename FromJson>
+    auto verify(const std::string& token, FromJson convert) const {
+        return convert(verifyJson(token));
+    }
+
+private:
+    std::string signJson(const Json::Value& payload) const {
         Json::Value header;
         header["alg"] = "HS256";
         header["typ"] = "JWT";
@@ -122,7 +136,7 @@ public:
         return encodedHeader + "." + encodedPayload + "." + encodedSignature;
     }
 
-    Json::Value verify(const std::string& token) const {
+    Json::Value verifyJson(const std::string& token) const {
         size_t firstDot = token.find('.');
         size_t secondDot = token.find('.', firstDot + 1);
 

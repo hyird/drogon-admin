@@ -3,11 +3,23 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const genName = () => randomUUID();
+const vendorChunkRules: Array<[RegExp, string]> = [
+  [/node_modules[\\/]+@tanstack[\\/]/, "vendor-query"],
+  [/node_modules[\\/]+ahooks[\\/]/, "vendor-ahooks"],
+  [/node_modules[\\/]+@ant-design[\\/]/, "vendor-antd"],
+  [/node_modules[\\/]+antd[\\/]/, "vendor-antd"],
+  [/node_modules[\\/]+framer-motion[\\/]/, "vendor-motion"],
+  [/node_modules[\\/]+@reduxjs[\\/]+toolkit[\\/]/, "vendor-state"],
+  [/node_modules[\\/]+react-redux[\\/]/, "vendor-state"],
+  [/node_modules[\\/]+redux-persist[\\/]/, "vendor-state"],
+  [/node_modules[\\/]+react-router-dom[\\/]/, "vendor-router"],
+  [/node_modules[\\/]+axios[\\/]/, "vendor-http"],
+  [/node_modules[\\/]+react-dom[\\/]/, "vendor-react"],
+  [/node_modules[\\/]+react[\\/]/, "vendor-react"],
+];
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -31,21 +43,17 @@ export default defineConfig({
     chunkSizeWarningLimit: 9999,
     rollupOptions: {
       output: {
-        entryFileNames: () => `assets/${genName()}.js`,
-        chunkFileNames: () => `assets/${genName()}.js`,
-        assetFileNames: (assetInfo) => {
-          const ext = assetInfo.name?.split(".").pop() || "bin";
-          return `assets/${genName()}.${ext}`;
-        },
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
         manualChunks(id) {
-          if (id.includes("node_modules")) {
-            // @tanstack/react-query 相关
-            if (id.includes("@tanstack")) {
-              return "vendor-query";
-            }
-            // ahooks
-            if (id.includes("ahooks")) {
-              return "vendor-ahooks";
+          if (!id.includes("node_modules")) {
+            return;
+          }
+
+          for (const [pattern, chunkName] of vendorChunkRules) {
+            if (pattern.test(id)) {
+              return chunkName;
             }
           }
         },

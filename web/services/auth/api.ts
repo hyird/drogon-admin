@@ -20,17 +20,24 @@ export function login(params: Auth.LoginRequest) {
 
 /** 刷新 Token */
 export function refreshToken(refreshToken: string) {
-  return request.post<{ token: string; refreshToken: string }>(ENDPOINTS.REFRESH, {
-    refreshToken,
-  });
+  return request.post<{ token: string; refreshToken: string }>(
+    ENDPOINTS.REFRESH,
+    {
+      refreshToken,
+    },
+    { skipAuthRefresh: true }
+  );
 }
 
 /** 获取当前用户信息 */
-export function fetchCurrentUser() {
-  return request.get<Auth.UserInfo>(ENDPOINTS.ME);
+export function fetchCurrentUser(token: string, skipAuthRefresh = false) {
+  return request.get<Auth.UserInfo>(ENDPOINTS.ME, {
+    authToken: token,
+    skipAuthRefresh,
+  });
 }
 
 /** 登出 */
 export function logout() {
-  return request.post<void>(ENDPOINTS.LOGOUT);
+  return request.post<void>(ENDPOINTS.LOGOUT, undefined, { skipAuthRefresh: true });
 }

@@ -2,9 +2,13 @@
 
 #include <drogon/HttpController.h>
 #include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include "common/database/DatabaseService.hpp"
 #include "common/utils/Response.hpp"
 #include "common/utils/AppException.hpp"
+#include "HomeHelpers.hpp"
 
 using namespace drogon;
 
@@ -33,13 +37,14 @@ public:
             auto menuResult = co_await db_.execSqlCoro("SELECT COUNT(*) as count FROM sys_menu WHERE deletedAt IS NULL");
             auto deptResult = co_await db_.execSqlCoro("SELECT COUNT(*) as count FROM sys_department WHERE deletedAt IS NULL");
 
-            Json::Value data;
-            data["userCount"] = userResult[0]["count"].as<int>();
-            data["roleCount"] = roleResult[0]["count"].as<int>();
-            data["menuCount"] = menuResult[0]["count"].as<int>();
-            data["departmentCount"] = deptResult[0]["count"].as<int>();
+            HomeHelpers::HomeStatsSummary stats{
+                .userCount = userResult[0]["count"].as<int>(),
+                .roleCount = roleResult[0]["count"].as<int>(),
+                .menuCount = menuResult[0]["count"].as<int>(),
+                .departmentCount = deptResult[0]["count"].as<int>(),
+            };
 
-            co_return Response::ok(data);
+            co_return Response::ok(stats, HomeHelpers::homeStatsToJson);
         } catch (const std::exception& e) {
             LOG_ERROR << "HomeController::stats error: " << e.what();
             co_return Response::internalError("获取统计数据失败");
@@ -66,19 +71,19 @@ public:
 #endif
             oss << std::put_time(&tmBuf, "%Y-%m-%dT%H:%M:%SZ");
 
-            Json::Value data;
-            data["version"] = "1.0.0";
-            data["serverTime"] = oss.str();
-            data["uptime"] = static_cast<Json::Int64>(uptime);
+            HomeHelpers::SystemInfoSummary info;
+            info.version = "1.0.0";
+            info.serverTime = oss.str();
+            info.uptime = uptime;
 #ifdef _WIN32
-            data["platform"] = "Windows";
+            info.platform = "Windows";
 #elif __APPLE__
-            data["platform"] = "macOS";
+            info.platform = "macOS";
 #else
-            data["platform"] = "Linux";
+            info.platform = "Linux";
 #endif
 
-            co_return Response::ok(data);
+            co_return Response::ok(info, HomeHelpers::systemInfoToJson);
         } catch (const std::exception& e) {
             LOG_ERROR << "HomeController::systemInfo error: " << e.what();
             co_return Response::internalError("获取系统信息失败");

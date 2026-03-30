@@ -67,6 +67,7 @@ class DatabaseService {
 public:
     DatabaseService() = default;
 
+    [[nodiscard]]
     DbClientPtr getClient() const {
         return AppDbConfig::useFast()
             ? app().getFastDbClient("default")

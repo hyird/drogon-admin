@@ -2,9 +2,9 @@ import { useEffect, useRef } from "react";
 import { Card, Form, Input, Button, Typography } from "antd";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
-import type { Auth } from "@/types";
 import { authApi } from "@/services";
 import { useAuthStore, usePermissionStore } from "@/store/hooks";
+import { loginSchema, validateWithZod, type LoginFormValues } from "@/validation";
 
 interface LocationState {
   from?: {
@@ -20,6 +20,8 @@ interface Particle {
   speedY: number;
   opacity: number;
 }
+
+const MAX_PARTICLES = 180;
 
 function createParticle(width: number, height: number): Particle {
   return {
@@ -51,7 +53,7 @@ function drawParticle(ctx: CanvasRenderingContext2D, p: Particle): void {
 const { Title } = Typography;
 
 export function LoginPage() {
-  const [form] = Form.useForm<Auth.LoginRequest>();
+  const [form] = Form.useForm<LoginFormValues>();
   const navigate = useNavigate();
   const location = useLocation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -74,10 +76,14 @@ export function LoginPage() {
     }
   }, [token, mutation.isPending, location.state, navigate]);
 
-  const onFinish = (values: Auth.LoginRequest) => {
+  const onFinish = (values: LoginFormValues) => {
     // 防止重复提交
     if (mutation.isPending) return;
-    mutation.mutate(values);
+
+    const parsed = validateWithZod(form, loginSchema, values);
+    if (!parsed) return;
+
+    mutation.mutate(parsed);
   };
 
   // 粒子动画
@@ -98,7 +104,10 @@ export function LoginPage() {
 
     const init = () => {
       particles = [];
-      const particleCount = Math.floor((canvas.width * canvas.height) / 15000);
+      const particleCount = Math.min(
+        MAX_PARTICLES,
+        Math.floor((canvas.width * canvas.height) / 15000)
+      );
       for (let i = 0; i < particleCount; i++) {
         particles.push(createParticle(canvas.width, canvas.height));
       }
@@ -194,24 +203,16 @@ export function LoginPage() {
           <Title level={3} style={{ textAlign: "center", marginBottom: 24 }}>
             登录
           </Title>
-          <Form<Auth.LoginRequest>
+          <Form<LoginFormValues>
             form={form}
             layout="vertical"
             initialValues={{ username: "admin", password: "admin123" }}
             onFinish={onFinish}
           >
-            <Form.Item
-              label="用户名"
-              name="username"
-              rules={[{ required: true, message: "请输入用户名" }]}
-            >
+            <Form.Item label="用户名" name="username" required>
               <Input placeholder="admin" />
             </Form.Item>
-            <Form.Item
-              label="密码"
-              name="password"
-              rules={[{ required: true, message: "请输入密码" }]}
-            >
+            <Form.Item label="密码" name="password" required>
               <Input.Password placeholder="123456" />
             </Form.Item>
             <Form.Item>
