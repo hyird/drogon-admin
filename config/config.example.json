@@ -1,0 +1,45 @@
+{
+  "listeners": [{ "address": "0.0.0.0", "port": 3000 }],
+  "app": {
+    "document_root": "./web",
+    "home_page": "index.html"
+  },
+  "db_clients": [
+    {
+      "name": "default",
+      "rdbms": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "user": "root",
+      "passwd": "your_mysql_password",
+      "dbname": "admin",
+      "is_fast": true
+    }
+  ],
+  "redis_clients": [
+    {
+      "name": "default",
+      "host": "127.0.0.1",
+      "port": 6379,
+      "passwd": "your_redis_password",
+      "db": 0,
+      "is_fast": true
+    }
+  ],
+  "custom_config": {
+    "log_level": "INFO",
+    "console_log": true,
+    "jwt": {
+      "secret": "replace_this_with_a_secure_secret",
+      "access_token_expires_in": 604800,
+      "refresh_token_secret": "replace_this_with_a_secure_refresh_secret",
+      "refresh_token_expires_in": 2592000
+    },
+    "cache": {
+      "enabled": true,
+      "user_session_ttl": 3600,
+      "user_menus_ttl": 1800,
+      "user_roles_ttl": 3600
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "admin-starter-backend",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "drogon",
+      "features": ["mysql", "redis"]
+    },
+    {
+      "name": "libmariadb",
+      "features": ["openssl"]
+    },
+    "hiredis"
+  ]
+}

@@ -1,0 +1,139 @@
+#pragma once
+
+#include <algorithm>
+#include <drogon/HttpRequest.h>
+#include <drogon/HttpResponse.h>
+#include <json/json.h>
+#include <string>
+
+#include "RequestValidation.hpp"
+
+using namespace drogon;
+
+/**
+ * @brief 分页参数结构
+ * 不传 pageSize 时获取全部数据
+ */
+struct Pagination {
+    int page = 1;
+    int pageSize = 0;  // 0 表示不分页
+    long long offset = 0;
+    std::string keyword;
+
+    bool isPaged() const { return pageSize > 0; }
+
+    static Pagination fromRequest(const HttpRequestPtr& req) {
+        Pagination p;
+
+        if (auto pageSize = RequestValidation::optionalPositiveIntQuery(req, "pageSize", "每页条数")) {
+            p.pageSize = std::clamp(*pageSize, 1, 100);
+            if (auto page = RequestValidation::optionalPositiveIntQuery(req, "page", "页码")) {
+                p.page = *page;
+            }
+            p.offset = static_cast<long long>(p.page - 1) * p.pageSize;
+        }
+
+        p.keyword = RequestValidation::optionalQueryText(req, "keyword").value_or("");
+        return p;
+    }
+
+    template <typename T, typename ToJson>
+    static HttpResponsePtr buildResponse(const std::vector<T>& items,
+                                         ToJson convert,
+                                         int total,
+                                          int page,
+                                          int pageSize) {
+        Json::Value data;
+        data["list"] = convert(items);
+        data["total"] = total;
+
+        if (pageSize > 0) {
+            data["page"] = page;
+            data["pageSize"] = pageSize;
+            data["totalPages"] = (total + pageSize - 1) / pageSize;
+        }
+
+        Json::Value json;
+        json["code"] = 0;
+        json["message"] = "Success";
+        json["data"] = data;
+
+        auto resp = HttpResponse::newHttpJsonResponse(json);
+        resp->setStatusCode(k200OK);
+        return resp;
+    }
+
+    std::string limitClause() const {
+        if (pageSize <= 0) return "";
+        return " LIMIT " + std::to_string(pageSize) + " OFFSET " + std::to_string(offset);
+    }
+};
+
+/**
+ * @brief 查询条件构建器
+ */
+class QueryBuilder {
+private:
+    std::vector<std::string> conditions_;
+    std::vector<std::string> params_;
+
+public:
+    QueryBuilder& eq(const std::string& field, const std::string& value) {
+        if (!value.empty()) {
+            conditions_.push_back(field + " = ?");
+            params_.push_back(value);
+        }
+        return *this;
+    }
+
+    QueryBuilder& ne(const std::string& field, const std::string& value) {
+        if (!value.empty()) {
+            conditions_.push_back(field + " != ?");
+            params_.push_back(value);
+        }
+        return *this;
+    }
+
+    QueryBuilder& like(const std::string& field, const std::string& value) {
+        if (!value.empty()) {
+            conditions_.push_back(field + " LIKE ?");
+            params_.push_back("%" + value + "%");
+        }
+        return *this;
+    }
+
+    QueryBuilder& likeAny(const std::vector<std::string>& fields, const std::string& value) {
+        if (!value.empty() && !fields.empty()) {
+            std::string condition = "(";
+            for (size_t i = 0; i < fields.size(); ++i) {
+                if (i > 0) condition += " OR ";
+                condition += fields[i] + " LIKE ?";
+                params_.push_back("%" + value + "%");
+            }
+            condition += ")";
+            conditions_.push_back(condition);
+        }
+        return *this;
+    }
+
+    QueryBuilder& notDeleted(const std::string& field = "deletedAt") {
+        conditions_.push_back(field + " IS NULL");
+        return *this;
+    }
+
+    std::string whereClause() const {
+        if (conditions_.empty()) {
+            return "";
+        }
+        std::string result = " WHERE ";
+        for (size_t i = 0; i < conditions_.size(); ++i) {
+            if (i > 0) result += " AND ";
+            result += conditions_[i];
+        }
+        return result;
+    }
+
+    const std::vector<std::string>& params() const {
+        return params_;
+    }
+};
