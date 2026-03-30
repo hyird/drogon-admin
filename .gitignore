@@ -18,6 +18,7 @@ logs/
 # 环境配置
 .env
 .env.local
+config/config.json
 
 # Claude Code
 .claude/
