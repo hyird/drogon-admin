@@ -19,3 +19,5 @@ This directory contains versioned startup migrations.
 - `V1_CreateBaseSchema.hpp`
 - `V2_SeedDefaultAdmin.hpp`
 - `V3_SeedDefaultMenus.hpp`
+- `V4_NormalizeNullableReferences.hpp`
+- `V5_AddDepartmentCodeAndSeedDepartments.hpp`

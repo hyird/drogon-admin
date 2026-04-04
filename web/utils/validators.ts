@@ -52,6 +52,14 @@ export function validateId(id: number): boolean {
 }
 
 /**
+ * 将可选的正整数 ID 归一化为 null
+ * 用于编辑表单回填，避免后端用 0 表示“无关联”时污染表单值
+ */
+export function normalizeNullablePositiveId(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/**
  * 验证字符串长度
  */
 export function validateLength(str: string, min: number, max: number): boolean {

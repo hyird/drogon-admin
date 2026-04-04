@@ -160,7 +160,11 @@ const SystemRolePage = () => {
         form.resetFields();
         form.setFieldsValue({ status: "enabled" });
       }
+      return;
     }
+
+    form.resetFields();
+    setEditing(null);
   };
 
   const openPermModal = (record: Role.Item) => {
@@ -185,8 +189,6 @@ const SystemRolePage = () => {
     saveMutation.mutate(parsed, {
       onSuccess: () => {
         setModalVisible(false);
-        setEditing(null);
-        form.resetFields();
       },
     });
   };
@@ -352,8 +354,6 @@ const SystemRolePage = () => {
         title={editing ? "编辑角色" : "新建角色"}
         onCancel={() => {
           setModalVisible(false);
-          setEditing(null);
-          form.resetFields();
         }}
         onOk={() => form.submit()}
         confirmLoading={saveMutation.isPending}

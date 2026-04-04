@@ -30,6 +30,15 @@ inline Json::Value homeStatsToJson(const HomeStatsSummary& stats) {
     return json;
 }
 
+inline HomeStatsSummary homeStatsFromJson(const Json::Value& json) {
+    HomeStatsSummary stats;
+    stats.userCount = json.isMember("userCount") ? json["userCount"].asInt() : 0;
+    stats.roleCount = json.isMember("roleCount") ? json["roleCount"].asInt() : 0;
+    stats.menuCount = json.isMember("menuCount") ? json["menuCount"].asInt() : 0;
+    stats.departmentCount = json.isMember("departmentCount") ? json["departmentCount"].asInt() : 0;
+    return stats;
+}
+
 inline Json::Value systemInfoToJson(const SystemInfoSummary& info) {
     Json::Value json;
     json["version"] = info.version;

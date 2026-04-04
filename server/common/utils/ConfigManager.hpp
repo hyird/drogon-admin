@@ -99,4 +99,22 @@ public:
         auto& config = app().getCustomConfig();
         return config.get("console_log", false).asBool();
     }
+
+    static int getLoginRateLimitMaxRequests() {
+        auto& config = app().getCustomConfig();
+        if (!config.isMember("cache") || !config["cache"].isObject()) {
+            return 10;
+        }
+
+        return config["cache"].get("login_rate_limit_max_requests", 10).asInt();
+    }
+
+    static int getLoginRateLimitWindowSeconds() {
+        auto& config = app().getCustomConfig();
+        if (!config.isMember("cache") || !config["cache"].isObject()) {
+            return 60;
+        }
+
+        return config["cache"].get("login_rate_limit_window_seconds", 60).asInt();
+    }
 };

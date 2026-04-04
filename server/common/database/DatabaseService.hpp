@@ -3,6 +3,7 @@
 #include <drogon/orm/DbClient.h>
 #include <drogon/HttpAppFramework.h>
 #include <memory>
+#include <optional>
 #include <regex>
 
 using namespace drogon;
@@ -28,6 +29,20 @@ inline std::string escapeSqlParam(const std::string& param) {
     return escaped;
 }
 
+inline void appendSqlParam(std::string& result, const std::string& param) {
+    result += '\'';
+    result += escapeSqlParam(param);
+    result += '\'';
+}
+
+inline void appendSqlParam(std::string& result, const std::optional<std::string>& param) {
+    if (param.has_value()) {
+        appendSqlParam(result, *param);
+    } else {
+        result += "NULL";
+    }
+}
+
 /**
  * @brief 替换 SQL 中的 ? 占位符
  */
@@ -40,9 +55,25 @@ inline std::string buildSql(const std::string& sql, const std::vector<std::strin
     size_t paramIndex = 0;
     for (size_t i = 0; i < sql.size(); ++i) {
         if (sql[i] == '?' && paramIndex < params.size()) {
-            result += '\'';
-            result += escapeSqlParam(params[paramIndex++]);
-            result += '\'';
+            appendSqlParam(result, params[paramIndex++]);
+        } else {
+            result += sql[i];
+        }
+    }
+    return result;
+}
+
+inline std::string buildSqlNullable(const std::string& sql,
+                                    const std::vector<std::optional<std::string>>& params) {
+    if (params.empty()) return sql;
+
+    std::string result;
+    result.reserve(sql.size() + params.size() * 32);
+
+    size_t paramIndex = 0;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        if (sql[i] == '?' && paramIndex < params.size()) {
+            appendSqlParam(result, params[paramIndex++]);
         } else {
             result += sql[i];
         }
@@ -77,6 +108,12 @@ public:
     Task<Result> execSqlCoro(const std::string& sql,
                               const std::vector<std::string>& params = {}) {
         std::string finalSql = buildSql(sql, params);
+        co_return co_await getClient()->execSqlCoro(finalSql);
+    }
+
+    Task<Result> execSqlCoroNullable(const std::string& sql,
+                                     const std::vector<std::optional<std::string>>& params) {
+        std::string finalSql = buildSqlNullable(sql, params);
         co_return co_await getClient()->execSqlCoro(finalSql);
     }
 

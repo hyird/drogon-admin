@@ -2,6 +2,8 @@
 
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -97,6 +99,8 @@ struct CurrentUserSummary {
     std::string status;
     std::vector<RoleSummary> roles;
     std::vector<MenuSummary> menus;
+    std::vector<std::string> permissionCodes;
+    std::unordered_set<std::string> permissionCodeSet;
 };
 
 struct UserListItemSummary {
@@ -163,6 +167,13 @@ inline std::vector<T> fromJsonArray(const Json::Value& json, Mapper&& mapper) {
     return result;
 }
 
+inline Json::Value nullablePositiveIntToJson(int value) {
+    if (value > 0) {
+        return Json::Value(value);
+    }
+    return Json::Value(Json::nullValue);
+}
+
 inline Json::Value roleToJson(const RoleSummary& role) {
     Json::Value json;
     json["id"] = role.id;
@@ -183,6 +194,30 @@ inline Json::Value roleRecordToJson(const RoleRecordSummary& role) {
     return json;
 }
 
+inline RoleRecordSummary roleRecordFromJson(const Json::Value& json) {
+    RoleRecordSummary role;
+    role.id = json.isMember("id") ? json["id"].asInt() : 0;
+    role.name = json.isMember("name") ? json["name"].asString() : "";
+    role.code = json.isMember("code") ? json["code"].asString() : "";
+    role.description = json.isMember("description") ? json["description"].asString() : "";
+    role.status = json.isMember("status") ? json["status"].asString() : "";
+    role.createdAt = json.isMember("createdAt") ? json["createdAt"].asString() : "";
+    role.updatedAt = json.isMember("updatedAt") ? json["updatedAt"].asString() : "";
+    return role;
+}
+
+inline Json::Value roleRecordItemsToJson(const std::vector<RoleRecordSummary>& items) {
+    return toJsonArray(items, [](const RoleRecordSummary& item) {
+        return roleRecordToJson(item);
+    });
+}
+
+inline std::vector<RoleRecordSummary> roleRecordItemsFromJson(const Json::Value& json) {
+    return fromJsonArray<RoleRecordSummary>(json, [](const Json::Value& item) {
+        return roleRecordFromJson(item);
+    });
+}
+
 inline Json::Value rolesToJson(const std::vector<RoleSummary>& roles) {
     return toJsonArray(roles, [](const RoleSummary& role) {
         return roleToJson(role);
@@ -193,7 +228,7 @@ inline Json::Value menuToJson(const MenuSummary& menu) {
     Json::Value json;
     json["id"] = menu.id;
     json["name"] = menu.name;
-    json["parentId"] = menu.parentId;
+    json["parentId"] = nullablePositiveIntToJson(menu.parentId);
     json["type"] = menu.type;
     json["path"] = menu.path;
     json["component"] = menu.component;
@@ -210,7 +245,7 @@ inline Json::Value menuRecordToJson(const MenuRecordSummary& menu) {
     json["name"] = menu.name;
     json["path"] = menu.path;
     json["icon"] = menu.icon;
-    json["parentId"] = menu.parentId;
+    json["parentId"] = nullablePositiveIntToJson(menu.parentId);
     json["order"] = menu.order;
     json["type"] = menu.type;
     json["component"] = menu.component;
@@ -222,9 +257,33 @@ inline Json::Value menuRecordToJson(const MenuRecordSummary& menu) {
     return json;
 }
 
+inline MenuRecordSummary menuRecordFromJson(const Json::Value& json) {
+    MenuRecordSummary menu;
+    menu.id = json.isMember("id") ? json["id"].asInt() : 0;
+    menu.name = json.isMember("name") ? json["name"].asString() : "";
+    menu.path = json.isMember("path") ? json["path"].asString() : "";
+    menu.icon = json.isMember("icon") ? json["icon"].asString() : "";
+    menu.parentId = json.isMember("parentId") ? json["parentId"].asInt() : 0;
+    menu.order = json.isMember("order") ? json["order"].asInt() : 0;
+    menu.type = json.isMember("type") ? json["type"].asString() : "";
+    menu.component = json.isMember("component") ? json["component"].asString() : "";
+    menu.status = json.isMember("status") ? json["status"].asString() : "";
+    menu.permissionCode = json.isMember("permissionCode") ? json["permissionCode"].asString() : "";
+    menu.isDefault = json.isMember("isDefault") ? json["isDefault"].asBool() : false;
+    menu.createdAt = json.isMember("createdAt") ? json["createdAt"].asString() : "";
+    menu.updatedAt = json.isMember("updatedAt") ? json["updatedAt"].asString() : "";
+    return menu;
+}
+
 inline Json::Value menuRecordItemsToJson(const std::vector<MenuRecordSummary>& items) {
     return toJsonArray(items, [](const MenuRecordSummary& item) {
         return menuRecordToJson(item);
+    });
+}
+
+inline std::vector<MenuRecordSummary> menuRecordItemsFromJson(const Json::Value& json) {
+    return fromJsonArray<MenuRecordSummary>(json, [](const Json::Value& item) {
+        return menuRecordFromJson(item);
     });
 }
 
@@ -234,12 +293,117 @@ inline Json::Value menusToJson(const std::vector<MenuSummary>& menus) {
     });
 }
 
+inline std::vector<std::string> permissionCodesFromMenus(const std::vector<MenuSummary>& menus) {
+    std::vector<std::string> permissionCodes;
+    std::unordered_set<std::string> seen;
+    permissionCodes.reserve(menus.size());
+
+    for (const auto& menu : menus) {
+        if (menu.permissionCode.empty()) {
+            continue;
+        }
+
+        if (!seen.insert(menu.permissionCode).second) {
+            continue;
+        }
+
+        permissionCodes.push_back(menu.permissionCode);
+    }
+
+    return permissionCodes;
+}
+
+inline std::unordered_set<std::string> permissionCodeSetFromCodes(const std::vector<std::string>& permissionCodes) {
+    std::unordered_set<std::string> permissionCodeSet;
+    permissionCodeSet.reserve(permissionCodes.size());
+    for (const auto& code : permissionCodes) {
+        if (!code.empty()) {
+            permissionCodeSet.insert(code);
+        }
+    }
+
+    return permissionCodeSet;
+}
+
+inline std::unordered_set<std::string> permissionCodeSetFromMenus(const std::vector<MenuSummary>& menus) {
+    std::unordered_set<std::string> permissionCodeSet;
+    permissionCodeSet.reserve(menus.size());
+    for (const auto& menu : menus) {
+        if (!menu.permissionCode.empty()) {
+            permissionCodeSet.insert(menu.permissionCode);
+        }
+    }
+
+    return permissionCodeSet;
+}
+
+inline std::unordered_map<int, RoleSummary> enabledRoleSummaryMapFromRecords(
+    const std::vector<RoleRecordSummary>& roleRecords) {
+    std::unordered_map<int, RoleSummary> roleMap;
+    roleMap.reserve(roleRecords.size());
+    for (const auto& record : roleRecords) {
+        if (record.status != "enabled") {
+            continue;
+        }
+
+        roleMap.emplace(record.id, RoleSummary{record.id, record.name, record.code});
+    }
+
+    return roleMap;
+}
+
+inline std::vector<MenuSummary> enabledMenuSummariesFromRecords(
+    const std::vector<MenuRecordSummary>& menuRecords) {
+    std::vector<MenuSummary> menus;
+    menus.reserve(menuRecords.size());
+    for (const auto& record : menuRecords) {
+        if (record.status != "enabled") {
+            continue;
+        }
+
+        MenuSummary menu;
+        menu.id = record.id;
+        menu.name = record.name;
+        menu.parentId = record.parentId;
+        menu.type = record.type;
+        menu.path = record.path;
+        menu.component = record.component;
+        menu.permissionCode = record.permissionCode;
+        menu.icon = record.icon;
+        menu.order = record.order;
+        menu.visible = true;
+        menus.push_back(std::move(menu));
+    }
+    return menus;
+}
+
+inline std::unordered_set<std::string> permissionCodeSetFromMenuRecords(
+    const std::vector<MenuRecordSummary>& menuRecords,
+    const std::unordered_set<int>& allowedMenuIds) {
+    std::unordered_set<std::string> permissionCodeSet;
+    permissionCodeSet.reserve(menuRecords.size());
+    for (const auto& record : menuRecords) {
+        if (record.status != "enabled") {
+            continue;
+        }
+
+        if (allowedMenuIds.find(record.id) == allowedMenuIds.end()) {
+            continue;
+        }
+
+        if (!record.permissionCode.empty()) {
+            permissionCodeSet.insert(record.permissionCode);
+        }
+    }
+    return permissionCodeSet;
+}
+
 inline Json::Value roleMenuToJson(const RoleMenuSummary& menu) {
     Json::Value json;
     json["id"] = menu.id;
     json["name"] = menu.name;
     json["type"] = menu.type;
-    json["parentId"] = menu.parentId;
+    json["parentId"] = nullablePositiveIntToJson(menu.parentId);
     return json;
 }
 
@@ -346,6 +510,15 @@ inline RoleMenuSummary roleMenuSummaryFromRow(const drogon::orm::Row& row) {
     return menu;
 }
 
+inline RoleMenuSummary roleMenuSummaryFromMenuRecord(const MenuRecordSummary& menu) {
+    RoleMenuSummary summary;
+    summary.id = menu.id;
+    summary.name = menu.name;
+    summary.type = menu.type;
+    summary.parentId = menu.parentId;
+    return summary;
+}
+
 inline MenuSummary menuSummaryFromRow(const drogon::orm::Row& row) {
     MenuSummary menu;
     menu.id = F_INT(row["id"]);
@@ -361,6 +534,21 @@ inline MenuSummary menuSummaryFromRow(const drogon::orm::Row& row) {
     return menu;
 }
 
+inline MenuSummary menuSummaryFromMenuRecord(const MenuRecordSummary& record) {
+    MenuSummary menu;
+    menu.id = record.id;
+    menu.name = record.name;
+    menu.parentId = record.parentId;
+    menu.type = record.type;
+    menu.path = record.path;
+    menu.component = record.component;
+    menu.permissionCode = record.permissionCode;
+    menu.icon = record.icon;
+    menu.order = record.order;
+    menu.visible = record.status == "enabled";
+    return menu;
+}
+
 inline Json::Value userRecordToJson(const UserRecordSummary& user) {
     Json::Value json;
     json["id"] = user.id;
@@ -368,12 +556,41 @@ inline Json::Value userRecordToJson(const UserRecordSummary& user) {
     json["nickname"] = user.nickname;
     json["phone"] = user.phone;
     json["email"] = user.email;
-    json["departmentId"] = user.departmentId;
+    json["departmentId"] = nullablePositiveIntToJson(user.departmentId);
     json["departmentName"] = user.departmentName;
     json["status"] = user.status;
     json["createdAt"] = user.createdAt;
     json["updatedAt"] = user.updatedAt;
     return json;
+}
+
+inline UserRecordSummary userRecordFromJson(const Json::Value& json) {
+    UserRecordSummary user;
+    user.id = json.isMember("id") ? json["id"].asInt() : 0;
+    user.username = json.isMember("username") ? json["username"].asString() : "";
+    user.nickname = json.isMember("nickname") ? json["nickname"].asString() : "";
+    user.phone = json.isMember("phone") ? json["phone"].asString() : "";
+    user.email = json.isMember("email") ? json["email"].asString() : "";
+    user.departmentId = json.isMember("departmentId") && !json["departmentId"].isNull()
+        ? json["departmentId"].asInt()
+        : 0;
+    user.departmentName = json.isMember("departmentName") ? json["departmentName"].asString() : "";
+    user.status = json.isMember("status") ? json["status"].asString() : "";
+    user.createdAt = json.isMember("createdAt") ? json["createdAt"].asString() : "";
+    user.updatedAt = json.isMember("updatedAt") ? json["updatedAt"].asString() : "";
+    return user;
+}
+
+inline Json::Value userRecordItemsToJson(const std::vector<UserRecordSummary>& items) {
+    return toJsonArray(items, [](const UserRecordSummary& item) {
+        return userRecordToJson(item);
+    });
+}
+
+inline std::vector<UserRecordSummary> userRecordItemsFromJson(const Json::Value& json) {
+    return fromJsonArray<UserRecordSummary>(json, [](const Json::Value& item) {
+        return userRecordFromJson(item);
+    });
 }
 
 inline Json::Value userListItemToJson(const UserListItemSummary& item) {
@@ -400,18 +617,38 @@ inline Json::Value departmentRecordToJson(const DepartmentRecordSummary& departm
     json["id"] = department.id;
     json["name"] = department.name;
     json["code"] = department.code;
-    json["parentId"] = department.parentId;
+    json["parentId"] = nullablePositiveIntToJson(department.parentId);
     json["order"] = department.order;
-    json["leaderId"] = department.leaderId;
+    json["leaderId"] = nullablePositiveIntToJson(department.leaderId);
     json["status"] = department.status;
     json["createdAt"] = department.createdAt;
     json["updatedAt"] = department.updatedAt;
     return json;
 }
 
+inline DepartmentRecordSummary departmentRecordFromJson(const Json::Value& json) {
+    DepartmentRecordSummary department;
+    department.id = json.isMember("id") ? json["id"].asInt() : 0;
+    department.name = json.isMember("name") ? json["name"].asString() : "";
+    department.code = json.isMember("code") ? json["code"].asString() : "";
+    department.parentId = json.isMember("parentId") ? json["parentId"].asInt() : 0;
+    department.order = json.isMember("order") ? json["order"].asInt() : 0;
+    department.leaderId = json.isMember("leaderId") ? json["leaderId"].asInt() : 0;
+    department.status = json.isMember("status") ? json["status"].asString() : "";
+    department.createdAt = json.isMember("createdAt") ? json["createdAt"].asString() : "";
+    department.updatedAt = json.isMember("updatedAt") ? json["updatedAt"].asString() : "";
+    return department;
+}
+
 inline Json::Value departmentRecordItemsToJson(const std::vector<DepartmentRecordSummary>& items) {
     return toJsonArray(items, [](const DepartmentRecordSummary& item) {
         return departmentRecordToJson(item);
+    });
+}
+
+inline std::vector<DepartmentRecordSummary> departmentRecordItemsFromJson(const Json::Value& json) {
+    return fromJsonArray<DepartmentRecordSummary>(json, [](const Json::Value& item) {
+        return departmentRecordFromJson(item);
     });
 }
 
@@ -459,6 +696,9 @@ inline Json::Value currentUserToJson(const CurrentUserSummary& user) {
     json["status"] = user.status;
     json["roles"] = rolesToJson(user.roles);
     json["menus"] = menusToJson(user.menus);
+    json["permissionCodes"] = toJsonArray(user.permissionCodes, [](const std::string& code) {
+        return Json::Value(code);
+    });
     return json;
 }
 
@@ -499,6 +739,19 @@ inline Json::Value loginResponseToJson(const LoginResponseSummary& response) {
     return json;
 }
 
+inline void normalizeCurrentUser(CurrentUserSummary& user) {
+    if (user.permissionCodes.empty() && !user.menus.empty()) {
+        user.permissionCodes = permissionCodesFromMenus(user.menus);
+    }
+    if (user.permissionCodeSet.empty()) {
+        if (!user.permissionCodes.empty()) {
+            user.permissionCodeSet = permissionCodeSetFromCodes(user.permissionCodes);
+        } else if (!user.menus.empty()) {
+            user.permissionCodeSet = permissionCodeSetFromMenus(user.menus);
+        }
+    }
+}
+
 inline CurrentUserSummary currentUserFromJson(const Json::Value& json) {
     CurrentUserSummary user;
     user.id = json.isMember("id") ? json["id"].asInt() : 0;
@@ -507,6 +760,12 @@ inline CurrentUserSummary currentUserFromJson(const Json::Value& json) {
     user.status = json.isMember("status") ? json["status"].asString() : "";
     user.roles = rolesFromJson(json.isMember("roles") ? json["roles"] : Json::Value(Json::arrayValue));
     user.menus = menusFromJson(json.isMember("menus") ? json["menus"] : Json::Value(Json::arrayValue));
+    user.permissionCodes = fromJsonArray<std::string>(
+        json.isMember("permissionCodes") ? json["permissionCodes"] : Json::Value(Json::arrayValue),
+        [](const Json::Value& item) {
+            return item.asString();
+        });
+    normalizeCurrentUser(user);
     return user;
 }
 

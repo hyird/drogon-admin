@@ -2,6 +2,7 @@
 
 #include <drogon/orm/DbClient.h>
 #include <functional>
+#include <optional>
 #include <vector>
 #include <memory>
 
@@ -102,6 +103,19 @@ public:
         }
 
         std::string finalSql = buildSql(sql, params);
+        co_return co_await transaction_->execSqlCoro(finalSql);
+    }
+
+    Task<Result> execSqlCoroNullable(const std::string& sql,
+                                     const std::vector<std::optional<std::string>>& params) {
+        if (committed_) {
+            throw std::runtime_error("Transaction already committed");
+        }
+        if (rolledBack_) {
+            throw std::runtime_error("Transaction already rolled back");
+        }
+
+        std::string finalSql = buildSqlNullable(sql, params);
         co_return co_await transaction_->execSqlCoro(finalSql);
     }
 
@@ -212,14 +226,44 @@ private:
         size_t paramIndex = 0;
         for (size_t i = 0; i < sql.size(); ++i) {
             if (sql[i] == '?' && paramIndex < params.size()) {
-                result += '\'';
-                result += escapeSqlParam(params[paramIndex++]);
-                result += '\'';
+                appendSqlParam(result, params[paramIndex++]);
             } else {
                 result += sql[i];
             }
         }
         return result;
+    }
+
+    static std::string buildSqlNullable(const std::string& sql,
+                                        const std::vector<std::optional<std::string>>& params) {
+        if (params.empty()) return sql;
+
+        std::string result;
+        result.reserve(sql.size() + params.size() * 32);
+
+        size_t paramIndex = 0;
+        for (size_t i = 0; i < sql.size(); ++i) {
+            if (sql[i] == '?' && paramIndex < params.size()) {
+                appendSqlParam(result, params[paramIndex++]);
+            } else {
+                result += sql[i];
+            }
+        }
+        return result;
+    }
+
+    static void appendSqlParam(std::string& result, const std::string& param) {
+        result += '\'';
+        result += escapeSqlParam(param);
+        result += '\'';
+    }
+
+    static void appendSqlParam(std::string& result, const std::optional<std::string>& param) {
+        if (param.has_value()) {
+            appendSqlParam(result, *param);
+        } else {
+            result += "NULL";
+        }
     }
 
     static std::string escapeSqlParam(const std::string& param) {

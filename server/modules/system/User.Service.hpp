@@ -1,6 +1,11 @@
 #pragma once
 
+#include <algorithm>
+#include <optional>
+
 #include <drogon/drogon.h>
+#include <unordered_map>
+
 #include "common/database/DatabaseService.hpp"
 #include "common/database/TransactionGuard.hpp"
 #include "common/cache/CacheManager.hpp"
@@ -11,6 +16,10 @@
 #include "common/utils/TimestampHelper.hpp"
 #include "SystemHelpers.hpp"
 #include "SystemConstants.hpp"
+#include "SystemEntityGuard.hpp"
+#include "SystemDataLoader.hpp"
+#include "SystemRelationLoader.hpp"
+#include "SystemStringUtils.hpp"
 #include "SystemRequests.hpp"
 
 using namespace drogon;
@@ -25,61 +34,101 @@ private:
 
 public:
     Task<std::tuple<std::vector<SystemHelpers::UserListItemSummary>, int>> list(const SystemRequests::UserListQuery& query) {
-        QueryBuilder qb;
-        qb.notDeleted("u.deletedAt");
-        if (!query.pagination.keyword.empty()) {
-            qb.likeAny({"u.username", "u.nickname", "u.phone", "u.email"}, query.pagination.keyword);
-        }
-        if (query.status) {
-            qb.eq("u.status", *query.status);
-        }
-        if (query.departmentId) {
-            qb.eq("u.departmentId", std::to_string(*query.departmentId));
-        }
+        auto records = co_await SystemDataLoader::loadUserRecords(dbService_, cacheManager_);
+        auto filtered = filterUserRecords(records, query.status, query.departmentId, query.pagination.keyword);
+        int total = static_cast<int>(filtered.size());
 
-        auto countResult = co_await dbService_.execSqlCoro("SELECT COUNT(*) as count FROM sys_user u" + qb.whereClause(), qb.params());
-        int total = countResult.empty() ? 0 : F_INT(countResult[0]["count"]);
-
-        std::string sql = "SELECT u.*, d.name as departmentName FROM sys_user u LEFT JOIN sys_department d ON u.departmentId = d.id AND d.deletedAt IS NULL" + qb.whereClause() + " ORDER BY u.id ASC" + query.pagination.limitClause();
-        auto result = co_await dbService_.execSqlCoro(sql, qb.params());
+        auto paged = paginateUserRecords(filtered, query.pagination.page, query.pagination.pageSize);
 
         std::vector<SystemHelpers::UserListItemSummary> items;
-        items.reserve(result.size());
-        for (const auto& row : result) {
+        items.reserve(paged.size());
+        std::vector<int> userIds;
+        userIds.reserve(paged.size());
+        for (const auto& record : paged) {
             SystemHelpers::UserListItemSummary item;
-            item.user = SystemHelpers::userRecordFromRow(row);
-            item.roles = co_await getUserRoles(F_INT(row["id"]));
+            item.user = record;
+            userIds.push_back(item.user.id);
             items.push_back(std::move(item));
         }
+
+        auto cachedRoles = co_await cacheManager_.getUserRolesBatch(userIds);
+        std::vector<bool> cacheHits(items.size(), false);
+        std::vector<int> missingUserIds;
+        missingUserIds.reserve(items.size());
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i < cachedRoles.size() && cachedRoles[i]) {
+                items[i].roles = *cachedRoles[i];
+                cacheHits[i] = true;
+            } else {
+                missingUserIds.push_back(items[i].user.id);
+            }
+        }
+
+        std::unordered_map<int, std::vector<SystemHelpers::RoleSummary>> loadedRoles;
+        if (!missingUserIds.empty()) {
+            loadedRoles = co_await SystemRelationLoader::loadUserRolesByIds(dbService_, cacheManager_, missingUserIds);
+        }
+
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (cacheHits[i]) {
+                continue;
+            }
+
+            auto it = loadedRoles.find(items[i].user.id);
+            if (it != loadedRoles.end()) {
+                items[i].roles = it->second;
+            } else {
+                items[i].roles.clear();
+            }
+
+            co_await cacheManager_.cacheUserRoles(items[i].user.id, items[i].roles);
+        }
+
         co_return std::make_tuple(items, total);
     }
 
     Task<SystemHelpers::UserDetailSummary> detail(int id) {
-        std::string sql = "SELECT u.*, d.name as departmentName FROM sys_user u LEFT JOIN sys_department d ON u.departmentId = d.id AND d.deletedAt IS NULL WHERE u.id = ? AND u.deletedAt IS NULL";
-        auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(id)});
-        if (result.empty()) throw NotFoundException("用户不存在");
+        auto records = co_await SystemDataLoader::loadUserRecords(dbService_, cacheManager_);
         SystemHelpers::UserDetailSummary item;
-        item.user = SystemHelpers::userRecordFromRow(result[0]);
-        item.roles = co_await getUserRoles(id);
-        item.roleIds = co_await getUserRoleIds(id);
+        bool found = false;
+        for (const auto& record : records) {
+            if (record.id == id) {
+                item.user = record;
+                found = true;
+                break;
+            }
+        }
+        if (!found) throw NotFoundException("用户不存在");
+        item.roles = co_await SystemRelationLoader::loadUserRoles(dbService_, cacheManager_, id);
+        item.roleIds = co_await SystemDataLoader::loadUserRoleIds(dbService_, id);
         co_return item;
     }
 
     Task<void> create(const SystemRequests::UserCreateRequest& data) {
         const std::string& username = data.username;
-        co_await checkUsernameUnique(username);
 
         auto tx = co_await TransactionGuard::create(dbService_);
+        co_await SystemEntityGuard::ensureUniqueValue(tx, "sys_user", "username", username, 0, "用户名已存在");
+        if (data.departmentId.has_value()) {
+            co_await SystemEntityGuard::lockEnabledRowForUpdate(tx, "sys_department", *data.departmentId, "部门不存在或已禁用");
+        }
         std::string passwordHash = PasswordUtils::hashPassword(data.password);
 
-        co_await tx.execSqlCoro(
+        std::vector<std::optional<std::string>> params = {
+            std::optional<std::string>{username},
+            std::optional<std::string>{passwordHash},
+            std::optional<std::string>{data.nickname.value_or("")},
+            std::optional<std::string>{data.phone.value_or("")},
+            std::optional<std::string>{data.email.value_or("")},
+            data.departmentId.has_value()
+                ? std::optional<std::string>{std::to_string(*data.departmentId)}
+                : std::nullopt,
+            std::optional<std::string>{data.status},
+            std::optional<std::string>{TimestampHelper::now()},
+        };
+        co_await tx.execSqlCoroNullable(
             "INSERT INTO sys_user (username, passwordHash, nickname, phone, email, departmentId, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            {
-                username, passwordHash, data.nickname.value_or(""),
-                data.phone.value_or(""), data.email.value_or(""),
-                data.departmentId.has_value() ? std::to_string(*data.departmentId) : "0",
-                data.status, TimestampHelper::now()
-            }
+            params
         );
 
         auto lastIdResult = co_await tx.execSqlCoro("SELECT LAST_INSERT_ID() as id");
@@ -93,27 +142,43 @@ public:
         tx.onCommit([this, userId]() -> Task<void> {
             co_await cacheManager_.clearUserCache(userId);
         });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateUserRecordsCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateHomeCache();
+        });
 
         co_await tx.commit();
     }
 
     Task<void> update(int id, const SystemRequests::UserUpdateRequest& data) {
-        co_await detail(id);
-        co_await checkNotBuiltinAdmin(id);
-
         auto tx = co_await TransactionGuard::create(dbService_);
+        auto user = co_await SystemEntityGuard::lockUserRecordForUpdate(tx, id);
+        if (user.username == SystemConstants::DEFAULT_ADMIN_USERNAME) {
+            throw ForbiddenException("不能编辑或删除内建管理员账户");
+        }
 
-        std::vector<std::string> setClauses, params;
-        auto addField = [&setClauses, &params](const std::string& f, const std::string& v) { setClauses.push_back(f + " = ?"); params.push_back(v); };
+        if (data.departmentId.has_value() && data.departmentId->has_value()) {
+            co_await SystemEntityGuard::lockEnabledRowForUpdate(tx, "sys_department", **data.departmentId, "部门不存在或已禁用");
+        }
+
+        std::vector<std::optional<std::string>> params;
+        std::vector<std::string> setClauses;
+        auto addField = [&setClauses, &params](const std::string& f, const std::string& v) {
+            setClauses.push_back(f + " = ?");
+            params.emplace_back(v);
+        };
 
         if (data.nickname) addField("nickname", *data.nickname);
         if (data.phone) addField("phone", *data.phone);
         if (data.email) addField("email", *data.email);
         if (data.departmentId.has_value()) {
+            setClauses.push_back("departmentId = ?");
             if (data.departmentId->has_value()) {
-                addField("departmentId", std::to_string(**data.departmentId));
+                params.emplace_back(std::to_string(**data.departmentId));
             } else {
-                addField("departmentId", "0");
+                params.emplace_back(std::nullopt);
             }
         }
         if (data.status) addField("status", *data.status);
@@ -125,7 +190,7 @@ public:
             std::string sql = "UPDATE sys_user SET ";
             for (size_t i = 0; i < setClauses.size(); ++i) { if (i > 0) sql += ", "; sql += setClauses[i]; }
             sql += " WHERE id = ?";
-            co_await tx.execSqlCoro(sql, params);
+            co_await tx.execSqlCoroNullable(sql, params);
         }
 
         if (data.roleIds) {
@@ -136,14 +201,22 @@ public:
         tx.onCommit([this, id]() -> Task<void> {
             co_await cacheManager_.clearUserCache(id);
         });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateUserRecordsCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateHomeCache();
+        });
 
         co_await tx.commit();
     }
 
     Task<void> remove(int id) {
-        co_await checkNotBuiltinAdmin(id);
-
         auto tx = co_await TransactionGuard::create(dbService_);
+        auto user = co_await SystemEntityGuard::lockUserRecordForUpdate(tx, id);
+        if (user.username == SystemConstants::DEFAULT_ADMIN_USERNAME) {
+            throw ForbiddenException("不能编辑或删除内建管理员账户");
+        }
 
         co_await tx.execSqlCoro("DELETE FROM sys_user_role WHERE userId = ?", {std::to_string(id)});
         co_await tx.execSqlCoro("UPDATE sys_user SET deletedAt = ? WHERE id = ?", {TimestampHelper::now(), std::to_string(id)});
@@ -152,53 +225,80 @@ public:
         tx.onCommit([this, id]() -> Task<void> {
             co_await cacheManager_.clearUserCache(id);
         });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateUserRecordsCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateHomeCache();
+        });
 
         co_await tx.commit();
     }
 
 private:
-    Task<void> checkUsernameUnique(const std::string& username, int excludeId = 0) {
-        std::string sql = "SELECT id FROM sys_user WHERE username = ? AND deletedAt IS NULL";
-        std::vector<std::string> params = {username};
-        if (excludeId > 0) { sql += " AND id != ?"; params.push_back(std::to_string(excludeId)); }
-        auto result = co_await dbService_.execSqlCoro(sql, params);
-        if (!result.empty()) throw ValidationException("用户名已存在");
-    }
+    static std::vector<SystemHelpers::UserRecordSummary> filterUserRecords(
+        const std::vector<SystemHelpers::UserRecordSummary>& records,
+        const std::optional<std::string>& status,
+        const std::optional<int>& departmentId,
+        const std::string& keyword) {
+        std::vector<SystemHelpers::UserRecordSummary> items;
+        items.reserve(records.size());
 
-    Task<void> checkNotBuiltinAdmin(int userId) {
-        auto result = co_await dbService_.execSqlCoro(
-            "SELECT id FROM sys_user WHERE id = ? AND username = ? AND deletedAt IS NULL",
-            {std::to_string(userId), std::string(SystemConstants::DEFAULT_ADMIN_USERNAME)});
-        if (!result.empty()) throw ForbiddenException("不能编辑或删除内建管理员账户");
-    }
+        for (const auto& record : records) {
+            if (status && record.status != *status) {
+                continue;
+            }
 
-    Task<std::vector<SystemHelpers::RoleSummary>> getUserRoles(int userId) {
-        auto result = co_await dbService_.execSqlCoro(
-            "SELECT r.id, r.name, r.code FROM sys_role r INNER JOIN sys_user_role ur ON r.id = ur.roleId WHERE ur.userId = ? AND r.deletedAt IS NULL",
-            {std::to_string(userId)});
-        std::vector<SystemHelpers::RoleSummary> roles;
-        roles.reserve(result.size());
-        for (const auto& row : result) {
-            roles.push_back(SystemHelpers::roleSummaryFromRow(row));
+            if (departmentId && record.departmentId != *departmentId) {
+                continue;
+            }
+
+            if (!keyword.empty() &&
+                !SystemStringUtils::containsIgnoreCase(record.username, keyword) &&
+                !SystemStringUtils::containsIgnoreCase(record.nickname, keyword) &&
+                !SystemStringUtils::containsIgnoreCase(record.phone, keyword) &&
+                !SystemStringUtils::containsIgnoreCase(record.email, keyword)) {
+                continue;
+            }
+
+            items.push_back(record);
         }
-        co_return roles;
+
+        return items;
     }
 
-    Task<std::vector<int>> getUserRoleIds(int userId) {
-        auto result = co_await dbService_.execSqlCoro("SELECT roleId FROM sys_user_role WHERE userId = ?", {std::to_string(userId)});
-        std::vector<int> roleIds;
-        roleIds.reserve(result.size());
-        for (const auto& row : result) roleIds.push_back(F_INT(row["roleId"]));
-        co_return roleIds;
+    static std::vector<SystemHelpers::UserRecordSummary> paginateUserRecords(
+        const std::vector<SystemHelpers::UserRecordSummary>& records,
+        int page,
+        int pageSize) {
+        if (pageSize <= 0) {
+            return records;
+        }
+
+        const long long safePage = std::max(page, 1);
+        const long long offset = static_cast<long long>(safePage - 1) * pageSize;
+        if (offset >= static_cast<long long>(records.size())) {
+            return {};
+        }
+
+        const auto begin = records.begin() + static_cast<std::vector<SystemHelpers::UserRecordSummary>::difference_type>(offset);
+        const auto end = records.begin() + static_cast<std::vector<SystemHelpers::UserRecordSummary>::difference_type>(
+            std::min<long long>(offset + pageSize, static_cast<long long>(records.size())));
+        return std::vector<SystemHelpers::UserRecordSummary>(begin, end);
     }
 
     Task<void> syncRoles(TransactionGuard& tx, int userId, const std::vector<int>& roleIds) {
+        co_await SystemEntityGuard::ensureEnabledIds(tx, "sys_role", roleIds, "角色不存在或已禁用");
         co_await tx.execSqlCoro("DELETE FROM sys_user_role WHERE userId = ?", {std::to_string(userId)});
 
-        if (!roleIds.empty()) {
+        std::vector<int> uniqueRoleIds = roleIds;
+        std::sort(uniqueRoleIds.begin(), uniqueRoleIds.end());
+        uniqueRoleIds.erase(std::unique(uniqueRoleIds.begin(), uniqueRoleIds.end()), uniqueRoleIds.end());
+
+        if (!uniqueRoleIds.empty()) {
             std::string sql = "INSERT INTO sys_user_role (userId, roleId) VALUES ";
             std::vector<std::string> valueParts, params;
-            for (int roleId : roleIds) {
+            for (int roleId : uniqueRoleIds) {
                 valueParts.push_back("(?, ?)");
                 params.push_back(std::to_string(userId));
                 params.push_back(std::to_string(roleId));
@@ -208,4 +308,5 @@ private:
             co_await tx.execSqlCoro(sql, params);
         }
     }
+
 };

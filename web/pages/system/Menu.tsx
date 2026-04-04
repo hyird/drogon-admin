@@ -24,7 +24,7 @@ import { usePermission } from "@/hooks";
 import { useAuthStore, usePermissionStore } from "@/store/hooks";
 import { MenuTypeMap } from "@/types/constants";
 import { store } from "@/store";
-import { filterMenuTree, flattenTree, getPathSegment } from "@/utils";
+import { filterMenuTree, flattenTree, getPathSegment, normalizeNullablePositiveId } from "@/utils";
 import { StatusTag } from "@/components/StatusTag";
 import { getRegisteredPages, getRegisteredPermissions, getPageConfig } from "@/config/registry";
 import { PageContainer } from "@/components/PageContainer";
@@ -250,8 +250,6 @@ const SystemMenuPage = () => {
     onSuccess: async () => {
       message.success("保存成功");
       setModalVisible(false);
-      setEditing(null);
-      form.resetFields();
       queryClient.invalidateQueries({ queryKey: ["menus", "tree"] });
       await syncAuthAfterMenuChange();
     },
@@ -288,7 +286,7 @@ const SystemMenuPage = () => {
       pathSegment,
       component: record.component,
       icon: record.icon,
-      parentId: record.parentId ?? null,
+      parentId: normalizeNullablePositiveId(record.parentId),
       order: record.order,
       type: record.type,
       status: record.status,
@@ -310,6 +308,13 @@ const SystemMenuPage = () => {
     if (!parsed) return;
 
     saveMutation.mutate(parsed);
+  };
+
+  const handleModalAfterOpen = (open: boolean) => {
+    if (!open) {
+      form.resetFields();
+      setEditing(null);
+    }
   };
 
   // 无查询权限时显示提示
@@ -440,11 +445,10 @@ const SystemMenuPage = () => {
         title={editing ? "编辑菜单" : "新建菜单"}
         onCancel={() => {
           setModalVisible(false);
-          setEditing(null);
-          form.resetFields();
         }}
         onOk={() => form.submit()}
         confirmLoading={saveMutation.isPending}
+        afterOpenChange={handleModalAfterOpen}
         destroyOnHidden
         width={640}
       >

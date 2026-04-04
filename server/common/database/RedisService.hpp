@@ -4,6 +4,8 @@
 #include <drogon/HttpAppFramework.h>
 #include <optional>
 #include <string>
+#include <sstream>
+#include <vector>
 
 using namespace drogon;
 using namespace drogon::nosql;
@@ -100,6 +102,50 @@ public:
     }
 
     /**
+     * @brief 批量获取多个键
+     */
+    Task<std::vector<std::optional<std::string>>> mget(const std::vector<std::string>& keys) {
+        if (!AppRedisConfig::enabled() || keys.empty()) {
+            co_return {};
+        }
+
+        auto client = getClient();
+        if (!client) {
+            co_return {};
+        }
+
+        try {
+            std::ostringstream command;
+            command << "MGET";
+            for (const auto& key : keys) {
+                command << ' ' << key;
+            }
+
+            auto result = co_await client->execCommandCoro(command.str().c_str());
+            if (result.type() != RedisResultType::kArray) {
+                LOG_WARN << "Redis MGET returned unexpected type";
+                co_return {};
+            }
+
+            auto values = result.asArray();
+            std::vector<std::optional<std::string>> output;
+            output.reserve(values.size());
+            for (const auto& value : values) {
+                if (value.isNil()) {
+                    output.emplace_back(std::nullopt);
+                } else {
+                    output.emplace_back(value.asString());
+                }
+            }
+
+            co_return output;
+        } catch (const std::exception& e) {
+            LOG_ERROR << "Redis MGET error: " << e.what();
+            co_return {};
+        }
+    }
+
+    /**
      * @brief 删除键
      */
     Task<bool> del(const std::string& key) {
@@ -118,36 +164,6 @@ public:
         } catch (const std::exception& e) {
             LOG_ERROR << "Redis DEL error for key '" << key << "': " << e.what();
             co_return false;
-        }
-    }
-
-    /**
-     * @brief 删除多个键（支持通配符）
-     */
-    Task<int> delPattern(const std::string& pattern) {
-        if (!AppRedisConfig::enabled()) {
-            co_return 0;
-        }
-
-        auto client = getClient();
-        if (!client) {
-            co_return 0;
-        }
-
-        try {
-            auto keysResult = co_await client->execCommandCoro("KEYS %s", pattern.c_str());
-            if (keysResult.isNil() || keysResult.asArray().empty()) {
-                co_return 0;
-            }
-
-            auto keys = keysResult.asArray();
-            for (const auto& key : keys) {
-                co_await del(key.asString());
-            }
-            co_return static_cast<int>(keys.size());
-        } catch (const std::exception& e) {
-            LOG_ERROR << "Redis delPattern error for pattern '" << pattern << "': " << e.what();
-            co_return 0;
         }
     }
 
@@ -232,11 +248,22 @@ public:
         }
 
         try {
-            auto count = co_await incr(key);
-            if (count == 1) {
-                co_await expire(key, ttl);
-            }
-            co_return count;
+            const std::string ttlText = std::to_string(ttl);
+            static constexpr const char* script = R"(
+                local count = redis.call('INCR', KEYS[1])
+                local ttl = tonumber(ARGV[1])
+                if ttl and ttl > 0 and count == 1 then
+                    redis.call('EXPIRE', KEYS[1], ttl)
+                end
+                return count
+            )";
+
+            auto result = co_await client->execCommandCoro(
+                "EVAL %s 1 %s %s",
+                script,
+                key.c_str(),
+                ttlText.c_str());
+            co_return result.asInteger();
         } catch (const std::exception& e) {
             LOG_ERROR << "Redis incrWithExpire error for key '" << key << "': " << e.what();
             co_return 0;

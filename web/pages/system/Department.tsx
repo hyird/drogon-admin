@@ -23,6 +23,7 @@ import { usePermission } from "@/hooks";
 import { StatusTag } from "@/components/StatusTag";
 import { PageContainer } from "@/components/PageContainer";
 import { departmentFormSchema, validateWithZod, type DepartmentFormValues } from "@/validation";
+import { normalizeNullablePositiveId } from "@/utils";
 
 const { Search } = Input;
 
@@ -131,8 +132,6 @@ const SystemDepartmentPage = () => {
     onSuccess: () => {
       message.success("保存成功");
       setModalVisible(false);
-      setEditing(null);
-      form.resetFields();
       queryClient.invalidateQueries({ queryKey: ["departments"] });
     },
   });
@@ -173,9 +172,9 @@ const SystemDepartmentPage = () => {
       id: record.id,
       name: record.name,
       code: record.code,
-      parentId: record.parentId ?? null,
+      parentId: normalizeNullablePositiveId(record.parentId),
       order: record.order,
-      leaderId: record.leaderId ?? null,
+      leaderId: normalizeNullablePositiveId(record.leaderId),
       status: record.status,
     });
     setModalVisible(true);
@@ -194,6 +193,13 @@ const SystemDepartmentPage = () => {
     if (!parsed) return;
 
     saveMutation.mutate(parsed);
+  };
+
+  const handleModalAfterOpen = (open: boolean) => {
+    if (!open) {
+      form.resetFields();
+      setEditing(null);
+    }
   };
 
   // 无查询权限时显示提示
@@ -321,11 +327,10 @@ const SystemDepartmentPage = () => {
         title={editing ? "编辑部门" : "新建部门"}
         onCancel={() => {
           setModalVisible(false);
-          setEditing(null);
-          form.resetFields();
         }}
         onOk={() => form.submit()}
         confirmLoading={saveMutation.isPending}
+        afterOpenChange={handleModalAfterOpen}
         destroyOnHidden
         width={560}
       >

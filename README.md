@@ -67,7 +67,6 @@
 │   ├── types/             # TypeScript 类型定义
 │   └── utils/             # 工具函数
 ├── config/                # 配置文件
-├── database/              # 数据库脚本
 └── CMakeLists.txt         # CMake 构建配置
 ```
 
@@ -84,10 +83,10 @@
 ### 数据库初始化
 
 ```bash
-mysql -u root -p < database/init.sql
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS admin CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 ```
 
-默认账号: `admin` / `admin123`
+然后启动服务，程序会自动执行迁移并写入默认账号、菜单和部门。
 
 ### Redis 安装（可选）
 

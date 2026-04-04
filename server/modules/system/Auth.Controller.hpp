@@ -1,7 +1,10 @@
 #pragma once
 
+#include <ctime>
+
 #include <drogon/HttpController.h>
 #include "common/utils/Response.hpp"
+#include "common/utils/ConfigManager.hpp"
 #include "common/utils/RequestValidation.hpp"
 #include "common/utils/JwtUtils.hpp"
 #include "common/utils/PasswordUtils.hpp"
@@ -12,6 +15,8 @@
 #include "common/utils/AuthContext.hpp"
 #include "SystemConstants.hpp"
 #include "SystemHelpers.hpp"
+#include "AuthSessionBuilder.hpp"
+#include "AuthRecordLoader.hpp"
 #include "AuthRequests.hpp"
 
 using namespace drogon;
@@ -49,6 +54,16 @@ public:
     Task<HttpResponsePtr> login(HttpRequestPtr req) {
         try {
             auto request = AuthRequests::makeLoginRequest(req);
+            const std::string clientIp = req->getPeerAddr().toIp();
+            const int loginRateLimitMaxRequests = ConfigManager::getLoginRateLimitMaxRequests();
+            const int loginRateLimitWindowSeconds = ConfigManager::getLoginRateLimitWindowSeconds();
+
+            std::string rateLimitScope = clientIp + ":" + request.username;
+            auto loginAttempts = co_await cacheManager_.checkRateLimitKey(
+                rateLimitScope, loginRateLimitMaxRequests, loginRateLimitWindowSeconds);
+            if (loginAttempts > loginRateLimitMaxRequests) {
+                co_return Response::error(429, "登录请求过于频繁，请稍后再试", k429TooManyRequests);
+            }
 
             // 检查登录失败次数
             auto failureCount = co_await cacheManager_.getLoginFailureCount(request.username);
@@ -56,31 +71,19 @@ public:
                 co_return Response::error(429, "登录失败次数过多，请15分钟后再试", k429TooManyRequests);
             }
 
-            std::string sql = R"(
-                SELECT id, username, passwordHash, nickname, status
-                FROM sys_user
-                WHERE username = ? AND deletedAt IS NULL
-            )";
-
-            auto result = co_await dbService_.execSqlCoro(sql, {request.username});
-
-            if (result.empty()) {
+            auto userRecord = co_await AuthRecordLoader::loadUserRecordByUsername(dbService_, cacheManager_, request.username);
+            if (!userRecord) {
                 co_await cacheManager_.recordLoginFailure(request.username);
                 throw AuthException::PasswordIncorrect();
             }
 
-            auto row = result[0];
-            int userId = F_INT(row["id"]);
-            std::string passwordHash = F_STR(row["passwordHash"]);
-            std::string nickname = F_STR_DEF(row["nickname"], "");
-            std::string status = F_STR(row["status"]);
-
-            if (!PasswordUtils::verifyPassword(request.password, passwordHash)) {
+            auto passwordHash = co_await AuthRecordLoader::loadUserPasswordHash(dbService_, userRecord->id);
+            if (!passwordHash || !PasswordUtils::verifyPassword(request.password, *passwordHash)) {
                 co_await cacheManager_.recordLoginFailure(request.username);
                 throw AuthException::PasswordIncorrect();
             }
 
-            if (status == "disabled") {
+            if (userRecord->status == "disabled") {
                 throw AuthException::UserDisabled();
             }
 
@@ -88,17 +91,23 @@ public:
             co_await cacheManager_.clearLoginFailure(request.username);
 
             SystemHelpers::AuthTokenClaims tokenClaims{
-                .userId = userId,
-                .username = request.username,
+                .userId = userRecord->id,
+                .username = userRecord->username,
             };
 
             std::string accessToken = jwtUtils_->sign(tokenClaims, SystemHelpers::authTokenClaimsToJson);
             std::string refreshToken = refreshJwtUtils_->sign(tokenClaims, SystemHelpers::authTokenClaimsToJson);
 
-            auto userInfo = co_await buildUserInfo(userId, request.username, nickname, status);
+            auto userInfo = co_await AuthSessionBuilder::buildUserInfo(
+                dbService_,
+                cacheManager_,
+                userRecord->id,
+                userRecord->username,
+                userRecord->nickname,
+                userRecord->status);
 
             // 缓存用户会话信息
-            co_await cacheManager_.cacheUserSession(userId, userInfo);
+            co_await cacheManager_.cacheUserSession(userRecord->id, userInfo);
             SystemHelpers::LoginResponseSummary response{
                 .tokens = {
                     .token = accessToken,
@@ -123,28 +132,18 @@ public:
 
             auto tokenClaims = refreshJwtUtils_->verify(request.refreshToken, SystemHelpers::authTokenClaimsFromJson);
             int userId = tokenClaims.userId;
-            std::string username = tokenClaims.username;
-
-            std::string sql = R"(
-                SELECT id, status
-                FROM sys_user
-                WHERE id = ? AND deletedAt IS NULL
-            )";
-
-            auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(userId)});
-
-            if (result.empty()) {
+            auto userRecord = co_await AuthRecordLoader::loadUserRecordById(dbService_, cacheManager_, userId);
+            if (!userRecord) {
                 throw AuthException::UserNotFound();
             }
 
-            std::string status = F_STR(result[0]["status"]);
-            if (status == "disabled") {
+            if (userRecord->status == "disabled") {
                 throw AuthException::UserDisabled();
             }
 
             SystemHelpers::AuthTokenClaims claims{
                 .userId = userId,
-                .username = username,
+                .username = userRecord->username.empty() ? tokenClaims.username : userRecord->username,
             };
 
             SystemHelpers::AuthTokensSummary tokens{
@@ -190,8 +189,8 @@ public:
                 // Token 已失效，忽略
             }
 
-            // 清除用户会话缓存
-            co_await cacheManager_.deleteUserSession(claims.userId);
+            // 使当前用户相关缓存失效，避免退出后仍命中旧会话快照
+            co_await cacheManager_.clearUserCache(claims.userId);
 
             co_return Response::success("登出成功");
 
@@ -224,32 +223,26 @@ public:
 
             LOG_DEBUG << "User session cache miss for userId: " << claims.userId;
 
-            std::string sql = R"(
-                SELECT id, username, nickname, status
-                FROM sys_user
-                WHERE id = ? AND deletedAt IS NULL
-            )";
-
-            auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(claims.userId)});
-
-            if (result.empty()) {
+            auto userRecord = co_await AuthRecordLoader::loadUserRecordById(dbService_, cacheManager_, claims.userId);
+            if (!userRecord) {
                 throw AuthException::UserNotFound();
             }
 
-            auto row = result[0];
-            if (claims.username.empty()) {
-                claims.username = F_STR(row["username"]);
-            }
-            std::string nickname = F_STR_DEF(row["nickname"], "");
-            std::string status = F_STR(row["status"]);
-
-            if (status == "disabled") {
+            if (userRecord->status == "disabled") {
                 throw AuthException::UserDisabled();
             }
 
-            auto userInfo = co_await buildUserInfo(claims.userId, claims.username, nickname, status);
+            claims.username = userRecord->username.empty() ? claims.username : userRecord->username;
+
+            auto userInfo = co_await AuthSessionBuilder::buildUserInfo(
+                dbService_,
+                cacheManager_,
+                userRecord->id,
+                claims.username,
+                userRecord->nickname,
+                userRecord->status);
             // 缓存结果
-            co_await cacheManager_.cacheUserSession(claims.userId, userInfo);
+            co_await cacheManager_.cacheUserSession(userRecord->id, userInfo);
 
             co_return Response::ok(userInfo, SystemHelpers::currentUserToJson, "获取成功");
 
@@ -262,124 +255,4 @@ public:
     }
 
 private:
-    Task<SystemHelpers::CurrentUserSummary> buildUserInfo(int userId,
-                                                          const std::string& username,
-                                                          const std::string& nickname,
-                                                          const std::string& status) {
-        SystemHelpers::CurrentUserSummary userInfo;
-        userInfo.id = userId;
-        userInfo.username = username;
-        userInfo.nickname = nickname;
-        userInfo.status = status;
-
-        userInfo.roles = co_await getUserRoles(userId);
-
-        if (SystemHelpers::hasSuperadminRole(userInfo.roles)) {
-            userInfo.menus = co_await getAllMenus();
-        } else {
-            userInfo.menus = co_await getUserMenus(userId);
-        }
-
-        co_return userInfo;
-    }
-
-    Task<std::vector<SystemHelpers::RoleSummary>> getUserRoles(int userId) {
-        // 先尝试从缓存获取
-        auto cached = co_await cacheManager_.getUserRoles(userId);
-        if (cached) {
-            LOG_DEBUG << "User roles cache hit for userId: " << userId;
-            co_return *cached;
-        }
-
-        LOG_DEBUG << "User roles cache miss for userId: " << userId;
-
-        std::string sql = R"(
-            SELECT r.id, r.name, r.code
-            FROM sys_role r
-            INNER JOIN sys_user_role ur ON r.id = ur.roleId
-            WHERE ur.userId = ? AND r.deletedAt IS NULL
-        )";
-
-        auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(userId)});
-
-        std::vector<SystemHelpers::RoleSummary> roles;
-        roles.reserve(result.size());
-        for (const auto& row : result) {
-            roles.push_back(SystemHelpers::roleSummaryFromRow(row));
-        }
-
-        // 缓存结果
-        co_await cacheManager_.cacheUserRoles(userId, roles);
-
-        co_return roles;
-    }
-
-    Task<std::vector<SystemHelpers::MenuSummary>> getAllMenus() {
-        // 先尝试从缓存获取
-        auto cached = co_await cacheManager_.getAllMenus();
-        if (cached) {
-            LOG_DEBUG << "All menus cache hit";
-            co_return *cached;
-        }
-
-        LOG_DEBUG << "All menus cache miss";
-
-        std::string sql = R"(
-            SELECT id, name, parentId, type, path, component, permissionCode,
-                   icon, status, `order`, 1 as visible
-            FROM sys_menu
-            WHERE status = 'enabled' AND deletedAt IS NULL
-            ORDER BY `order` ASC, id ASC
-        )";
-
-        auto result = co_await dbService_.execSqlCoro(sql);
-
-        std::vector<SystemHelpers::MenuSummary> menus;
-        menus.reserve(result.size());
-        for (const auto& row : result) {
-            menus.push_back(SystemHelpers::menuSummaryFromRow(row));
-        }
-
-        // 缓存结果
-        co_await cacheManager_.cacheAllMenus(menus);
-
-        co_return menus;
-    }
-
-    Task<std::vector<SystemHelpers::MenuSummary>> getUserMenus(int userId) {
-        // 先尝试从缓存获取
-        auto cached = co_await cacheManager_.getUserMenus(userId);
-        if (cached) {
-            LOG_DEBUG << "User menus cache hit for userId: " << userId;
-            co_return *cached;
-        }
-
-        LOG_DEBUG << "User menus cache miss for userId: " << userId;
-
-        std::string sql = R"(
-            SELECT DISTINCT m.id, m.name, m.parentId, m.type, m.path, m.component,
-                   m.permissionCode, m.icon, m.status, m.`order`, 1 as visible
-            FROM sys_menu m
-            INNER JOIN sys_role_menu rm ON m.id = rm.menuId
-            INNER JOIN sys_user_role ur ON rm.roleId = ur.roleId
-            INNER JOIN sys_role r ON ur.roleId = r.id
-            WHERE ur.userId = ?
-              AND r.status = 'enabled' AND r.deletedAt IS NULL
-              AND m.status = 'enabled' AND m.deletedAt IS NULL
-            ORDER BY m.`order` ASC, m.id ASC
-        )";
-
-        auto result = co_await dbService_.execSqlCoro(sql, {std::to_string(userId)});
-
-        std::vector<SystemHelpers::MenuSummary> menus;
-        menus.reserve(result.size());
-        for (const auto& row : result) {
-            menus.push_back(SystemHelpers::menuSummaryFromRow(row));
-        }
-
-        // 缓存结果
-        co_await cacheManager_.cacheUserMenus(userId, menus);
-
-        co_return menus;
-    }
 };

@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <drogon/drogon.h>
+#include <unordered_map>
+
 #include "common/database/DatabaseService.hpp"
 #include "common/database/TransactionGuard.hpp"
 #include "common/cache/CacheManager.hpp"
@@ -10,6 +13,10 @@
 #include "common/utils/TimestampHelper.hpp"
 #include "SystemConstants.hpp"
 #include "SystemHelpers.hpp"
+#include "SystemEntityGuard.hpp"
+#include "SystemDataLoader.hpp"
+#include "SystemRelationLoader.hpp"
+#include "SystemStringUtils.hpp"
 #include "SystemRequests.hpp"
 
 using namespace drogon;
@@ -24,59 +31,93 @@ private:
 
 public:
     Task<std::tuple<std::vector<SystemHelpers::RoleListItemSummary>, int>> list(const SystemRequests::RoleListQuery& query) {
-        QueryBuilder qb;
-        qb.notDeleted();
-        qb.ne("code", std::string(SystemConstants::SUPERADMIN_ROLE_CODE));
-        if (!query.pagination.keyword.empty()) {
-            qb.likeAny({"name", "code"}, query.pagination.keyword);
-        }
-        if (query.status) {
-            qb.eq("status", *query.status);
-        }
-
-        auto countResult = co_await dbService_.execSqlCoro("SELECT COUNT(*) as count FROM sys_role" + qb.whereClause(), qb.params());
-        int total = countResult.empty() ? 0 : F_INT(countResult[0]["count"]);
-
-        auto result = co_await dbService_.execSqlCoro("SELECT * FROM sys_role" + qb.whereClause() + " ORDER BY id ASC" + query.pagination.limitClause(), qb.params());
+        auto records = co_await SystemDataLoader::loadRoleRecords(dbService_, cacheManager_);
+        auto filtered = filterRoleRecords(records, query.status, query.pagination.keyword, true);
+        int total = static_cast<int>(filtered.size());
+        auto paged = paginateRoleRecords(filtered, query.pagination.page, query.pagination.pageSize);
 
         std::vector<SystemHelpers::RoleListItemSummary> items;
-        items.reserve(result.size());
-        for (const auto& row : result) {
+        items.reserve(paged.size());
+        std::vector<int> roleIds;
+        roleIds.reserve(paged.size());
+        for (const auto& record : paged) {
             SystemHelpers::RoleListItemSummary item;
-            item.role = SystemHelpers::roleRecordFromRow(row);
-            item.menuIds = co_await getRoleMenuIds(F_INT(row["id"]));
+            item.role = record;
+            roleIds.push_back(item.role.id);
             items.push_back(std::move(item));
         }
+
+        auto cachedMenuIds = co_await cacheManager_.getRoleMenuIdsBatch(roleIds);
+        std::vector<bool> cacheHits(items.size(), false);
+        std::vector<int> missingRoleIds;
+        missingRoleIds.reserve(items.size());
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i < cachedMenuIds.size() && cachedMenuIds[i]) {
+                items[i].menuIds = *cachedMenuIds[i];
+                cacheHits[i] = true;
+            } else {
+                missingRoleIds.push_back(items[i].role.id);
+            }
+        }
+
+        std::unordered_map<int, std::vector<int>> loadedMenuIds;
+        if (!missingRoleIds.empty()) {
+            loadedMenuIds = co_await SystemDataLoader::loadRoleMenuIdsByIds(dbService_, missingRoleIds);
+        }
+
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (cacheHits[i]) {
+                continue;
+            }
+
+            auto it = loadedMenuIds.find(items[i].role.id);
+            if (it != loadedMenuIds.end()) {
+                items[i].menuIds = it->second;
+            } else {
+                items[i].menuIds.clear();
+            }
+
+            co_await cacheManager_.cacheRoleMenuIds(items[i].role.id, items[i].menuIds);
+        }
+
         co_return std::make_tuple(items, total);
     }
 
     Task<std::vector<SystemHelpers::RoleSummary>> all() {
-        // 排除超级管理员角色，该角色只能分配给内置 admin 用户
-        auto result = co_await dbService_.execSqlCoro(
-            "SELECT id, name, code FROM sys_role WHERE status = 'enabled' AND deletedAt IS NULL AND code != ? ORDER BY id ASC",
-            {std::string(SystemConstants::SUPERADMIN_ROLE_CODE)});
+        auto records = co_await SystemDataLoader::loadRoleRecords(dbService_, cacheManager_);
         std::vector<SystemHelpers::RoleSummary> items;
-        items.reserve(result.size());
-        for (const auto& row : result) {
-            items.push_back(SystemHelpers::roleSummaryFromRow(row));
+        items.reserve(records.size());
+        for (const auto& record : records) {
+            if (record.status != "enabled" || record.code == SystemConstants::SUPERADMIN_ROLE_CODE) {
+                continue;
+            }
+            SystemHelpers::RoleSummary role;
+            role.id = record.id;
+            role.name = record.name;
+            role.code = record.code;
+            items.push_back(role);
         }
         co_return items;
     }
 
     Task<SystemHelpers::RoleDetailSummary> detail(int id) {
-        auto result = co_await dbService_.execSqlCoro("SELECT * FROM sys_role WHERE id = ? AND deletedAt IS NULL", {std::to_string(id)});
-        if (result.empty()) throw NotFoundException("角色不存在");
+        auto records = co_await SystemDataLoader::loadRoleRecords(dbService_, cacheManager_);
+        auto it = std::find_if(records.begin(), records.end(), [id](const auto& record) {
+            return record.id == id;
+        });
+        if (it == records.end()) throw NotFoundException("角色不存在");
         SystemHelpers::RoleDetailSummary item;
-        item.role = SystemHelpers::roleRecordFromRow(result[0]);
+        item.role = *it;
         item.menuIds = co_await getRoleMenuIds(id);
-        item.menus = co_await getRoleMenus(id);
+        item.menus = co_await SystemRelationLoader::loadRoleMenus(dbService_, cacheManager_, id);
         co_return item;
     }
 
     Task<void> create(const SystemRequests::RoleCreateRequest& data) {
-        if (!data.code.empty()) co_await checkCodeUnique(data.code);
-
         auto tx = co_await TransactionGuard::create(dbService_);
+        if (!data.code.empty()) {
+            co_await SystemEntityGuard::ensureUniqueValue(tx, "sys_role", "code", data.code, 0, "角色编码已存在");
+        }
 
         co_await tx.execSqlCoro(
             "INSERT INTO sys_role (name, code, description, status, createdAt) VALUES (?, ?, ?, ?, ?)",
@@ -96,24 +137,28 @@ public:
             co_await syncMenus(tx, roleId, *data.menuIds);
         }
 
-        // 提交成功后清除所有用户的角色和菜单缓存
+        // 提交成功后使授权相关缓存失效
         tx.onCommit([this]() -> Task<void> {
-            co_await cacheManager_.clearAllUserRolesCache();
-            co_await cacheManager_.clearAllUserMenusCache();
+            co_await cacheManager_.invalidateAuthorizationCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateRoleRecordsCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateHomeCache();
         });
 
         co_await tx.commit();
     }
 
     Task<void> update(int id, const SystemRequests::RoleUpdateRequest& data) {
-        auto role = co_await detail(id);
-        if (SystemHelpers::isRoleCode(role.role, SystemConstants::SUPERADMIN_ROLE_CODE))
+        auto tx = co_await TransactionGuard::create(dbService_);
+        auto role = co_await SystemEntityGuard::lockRoleRecordForUpdate(tx, id);
+        if (SystemHelpers::isRoleCode(role, SystemConstants::SUPERADMIN_ROLE_CODE))
             throw ForbiddenException("不能编辑超级管理员角色");
         if (data.code && !data.code->empty()) {
-            co_await checkCodeUnique(*data.code, id);
+            co_await SystemEntityGuard::ensureUniqueValue(tx, "sys_role", "code", *data.code, id, "角色编码已存在");
         }
-
-        auto tx = co_await TransactionGuard::create(dbService_);
 
         std::vector<std::string> setClauses, params;
         auto addField = [&setClauses, &params](const std::string& f, const std::string& v) { setClauses.push_back(f + " = ?"); params.push_back(v); };
@@ -136,74 +181,122 @@ public:
             co_await syncMenus(tx, id, *data.menuIds);
         }
 
-        // 提交成功后清除所有用户的角色和菜单缓存
+        // 提交成功后使授权相关缓存失效
         tx.onCommit([this]() -> Task<void> {
-            co_await cacheManager_.clearAllUserRolesCache();
-            co_await cacheManager_.clearAllUserMenusCache();
+            co_await cacheManager_.invalidateAuthorizationCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateRoleRecordsCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateHomeCache();
         });
 
         co_await tx.commit();
     }
 
     Task<void> remove(int id) {
-        auto role = co_await detail(id);
-        if (SystemHelpers::isRoleCode(role.role, SystemConstants::SUPERADMIN_ROLE_CODE))
-            throw ForbiddenException("不能删除超级管理员角色");
-
-        auto checkResult = co_await dbService_.execSqlCoro("SELECT COUNT(*) as count FROM sys_user_role WHERE roleId = ?", {std::to_string(id)});
-        if (!checkResult.empty() && F_INT(checkResult[0]["count"]) > 0)
-            throw ValidationException("该角色已被用户使用，无法删除");
-
         auto tx = co_await TransactionGuard::create(dbService_);
+        auto role = co_await SystemEntityGuard::lockRoleRecordForUpdate(tx, id);
+        if (SystemHelpers::isRoleCode(role, SystemConstants::SUPERADMIN_ROLE_CODE)) {
+            throw ForbiddenException("不能删除超级管理员角色");
+        }
+
+        if (co_await SystemEntityGuard::hasRoleUserUsage(tx, id)) {
+            throw ValidationException("该角色已被用户使用，无法删除");
+        }
 
         co_await tx.execSqlCoro("DELETE FROM sys_role_menu WHERE roleId = ?", {std::to_string(id)});
         co_await tx.execSqlCoro("UPDATE sys_role SET deletedAt = ? WHERE id = ?", {TimestampHelper::now(), std::to_string(id)});
 
-        // 提交成功后清除所有用户的角色和菜单缓存
+        // 提交成功后使授权相关缓存失效
         tx.onCommit([this]() -> Task<void> {
-            co_await cacheManager_.clearAllUserRolesCache();
-            co_await cacheManager_.clearAllUserMenusCache();
+            co_await cacheManager_.invalidateAuthorizationCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateRoleRecordsCache();
+        });
+        tx.onCommit([this]() -> Task<void> {
+            co_await cacheManager_.invalidateHomeCache();
         });
 
         co_await tx.commit();
     }
 
 private:
-    Task<void> checkCodeUnique(const std::string& code, int excludeId = 0) {
-        std::string sql = "SELECT id FROM sys_role WHERE code = ? AND deletedAt IS NULL";
-        std::vector<std::string> params = {code};
-        if (excludeId > 0) { sql += " AND id != ?"; params.push_back(std::to_string(excludeId)); }
-        auto result = co_await dbService_.execSqlCoro(sql, params);
-        if (!result.empty()) throw ValidationException("角色编码已存在");
-    }
-
     Task<std::vector<int>> getRoleMenuIds(int roleId) {
-        auto result = co_await dbService_.execSqlCoro("SELECT menuId FROM sys_role_menu WHERE roleId = ?", {std::to_string(roleId)});
-        std::vector<int> menuIds;
-        menuIds.reserve(result.size());
-        for (const auto& row : result) menuIds.push_back(F_INT(row["menuId"]));
+        auto cached = co_await cacheManager_.getRoleMenuIds(roleId);
+        if (cached) {
+            co_return *cached;
+        }
+
+        auto menuIds = co_await SystemDataLoader::loadRoleMenuIds(dbService_, roleId);
+
+        co_await cacheManager_.cacheRoleMenuIds(roleId, menuIds);
         co_return menuIds;
     }
 
-    Task<std::vector<SystemHelpers::RoleMenuSummary>> getRoleMenus(int roleId) {
-        auto result = co_await dbService_.execSqlCoro(
-            "SELECT m.id, m.name, m.type, m.parentId FROM sys_menu m INNER JOIN sys_role_menu rm ON m.id = rm.menuId WHERE rm.roleId = ? AND m.deletedAt IS NULL ORDER BY m.`order` ASC",
-            {std::to_string(roleId)});
-        std::vector<SystemHelpers::RoleMenuSummary> menus;
-        menus.reserve(result.size());
-        for (const auto& row : result) {
-            menus.push_back(SystemHelpers::roleMenuSummaryFromRow(row));
+    static std::vector<SystemHelpers::RoleRecordSummary> filterRoleRecords(
+        const std::vector<SystemHelpers::RoleRecordSummary>& records,
+        const std::optional<std::string>& status,
+        const std::string& keyword,
+        bool excludeSuperadmin) {
+        std::vector<SystemHelpers::RoleRecordSummary> items;
+        items.reserve(records.size());
+
+        for (const auto& record : records) {
+            if (excludeSuperadmin && record.code == SystemConstants::SUPERADMIN_ROLE_CODE) {
+                continue;
+            }
+
+            if (status && record.status != *status) {
+                continue;
+            }
+
+            if (!keyword.empty() &&
+                !SystemStringUtils::containsIgnoreCase(record.name, keyword) &&
+                !SystemStringUtils::containsIgnoreCase(record.code, keyword)) {
+                continue;
+            }
+
+            items.push_back(record);
         }
-        co_return menus;
+
+        return items;
+    }
+
+    static std::vector<SystemHelpers::RoleRecordSummary> paginateRoleRecords(
+        const std::vector<SystemHelpers::RoleRecordSummary>& records,
+        int page,
+        int pageSize) {
+        if (pageSize <= 0) {
+            return records;
+        }
+
+        const long long safePage = std::max(page, 1);
+        const long long offset = static_cast<long long>(safePage - 1) * pageSize;
+        if (offset >= static_cast<long long>(records.size())) {
+            return {};
+        }
+
+        const auto begin = records.begin() + static_cast<std::vector<SystemHelpers::RoleRecordSummary>::difference_type>(offset);
+        const auto end = records.begin() + static_cast<std::vector<SystemHelpers::RoleRecordSummary>::difference_type>(
+            std::min<long long>(offset + pageSize, static_cast<long long>(records.size())));
+        return std::vector<SystemHelpers::RoleRecordSummary>(begin, end);
     }
 
     Task<void> syncMenus(TransactionGuard& tx, int roleId, const std::vector<int>& menuIds) {
+        co_await SystemEntityGuard::ensureEnabledIds(tx, "sys_menu", menuIds, "菜单不存在或已禁用");
         co_await tx.execSqlCoro("DELETE FROM sys_role_menu WHERE roleId = ?", {std::to_string(roleId)});
 
-        if (!menuIds.empty()) {
+        std::vector<int> uniqueMenuIds = menuIds;
+        std::sort(uniqueMenuIds.begin(), uniqueMenuIds.end());
+        uniqueMenuIds.erase(std::unique(uniqueMenuIds.begin(), uniqueMenuIds.end()), uniqueMenuIds.end());
+
+        if (!uniqueMenuIds.empty()) {
             std::string sql = "INSERT INTO sys_role_menu (roleId, menuId) VALUES ";
             std::vector<std::string> valueParts, params;
-            for (int menuId : menuIds) {
+            for (int menuId : uniqueMenuIds) {
                 valueParts.push_back("(?, ?)");
                 params.push_back(std::to_string(roleId));
                 params.push_back(std::to_string(menuId));
@@ -213,4 +306,5 @@ private:
             co_await tx.execSqlCoro(sql, params);
         }
     }
+
 };

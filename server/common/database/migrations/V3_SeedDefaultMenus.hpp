@@ -1,6 +1,7 @@
 #pragma once
 
 #include <drogon/drogon.h>
+#include <optional>
 
 #include "common/database/DatabaseMigration.hpp"
 #include "common/database/migrations/MigrationTransaction.hpp"
@@ -11,9 +12,9 @@ inline drogon::Task<> applyV3SeedDefaultMenus(const drogon::orm::DbClientPtr& /*
     DatabaseService dbService;
     co_await runTransactionalMigration(dbService, [](TransactionGuard& tx) -> Task<> {
         // 首页菜单（作为独立一级菜单，默认显示）
-        co_await tx.execSqlCoro(buildSql(
+        co_await tx.execSqlCoro(buildSqlNullable(
             "INSERT IGNORE INTO sys_menu (id, name, parentId, type, path, component, icon, isDefault, `order`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            {"100", "首页", "0", "page", "/home", "Home", "HomeOutlined", "1", "0"}
+            std::vector<std::optional<std::string>>{"100", "首页", std::nullopt, "page", "/home", "Home", "HomeOutlined", "1", "0"}
         ));
         // 首页权限按钮
         co_await tx.execSqlCoro(buildSql(
@@ -22,9 +23,9 @@ inline drogon::Task<> applyV3SeedDefaultMenus(const drogon::orm::DbClientPtr& /*
         ));
 
         // 系统管理目录
-        co_await tx.execSqlCoro(buildSql(
+        co_await tx.execSqlCoro(buildSqlNullable(
             "INSERT IGNORE INTO sys_menu (id, name, parentId, type, path, icon, `order`) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            {"1", "系统管理", "0", "menu", "/system", "SettingOutlined", "1"}
+            std::vector<std::optional<std::string>>{"1", "系统管理", std::nullopt, "menu", "/system", "SettingOutlined", "1"}
         ));
 
         // 用户管理页面

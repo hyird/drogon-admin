@@ -6,6 +6,8 @@
 #include "common/database/migrations/V1_CreateBaseSchema.hpp"
 #include "common/database/migrations/V2_SeedDefaultAdmin.hpp"
 #include "common/database/migrations/V3_SeedDefaultMenus.hpp"
+#include "common/database/migrations/V4_NormalizeNullableReferences.hpp"
+#include "common/database/migrations/V5_AddDepartmentCodeAndSeedDepartments.hpp"
 
 namespace DatabaseMigrations {
 
@@ -14,6 +16,8 @@ inline const std::vector<DatabaseMigration::Step>& allMigrations() {
         createV1CreateBaseSchemaMigration(),
         createV2SeedDefaultAdminMigration(),
         createV3SeedDefaultMenusMigration(),
+        createV4NormalizeNullableReferencesMigration(),
+        createV5AddDepartmentCodeAndSeedDepartmentsMigration(),
     };
     return steps;
 }

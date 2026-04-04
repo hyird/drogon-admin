@@ -36,4 +36,5 @@ export interface UserInfo {
   status: string;
   roles: RoleOption[];
   menus: MenuItem[];
+  permissionCodes?: string[];
 }

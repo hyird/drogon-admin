@@ -38,8 +38,12 @@
     "cache": {
       "enabled": true,
       "user_session_ttl": 3600,
+      "user_records_ttl": 300,
       "user_menus_ttl": 1800,
-      "user_roles_ttl": 3600
+      "user_roles_ttl": 3600,
+      "home_stats_ttl": 300,
+      "login_rate_limit_max_requests": 10,
+      "login_rate_limit_window_seconds": 60
     }
   }
 }

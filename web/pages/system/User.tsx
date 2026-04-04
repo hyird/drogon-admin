@@ -18,6 +18,7 @@ import type { User, Role } from "@/types";
 import { usePermission } from "@/hooks";
 import { StatusTag } from "@/components/StatusTag";
 import { PageContainer } from "@/components/PageContainer";
+import { normalizeNullablePositiveId } from "@/utils";
 import {
   useUserList,
   useUserSave,
@@ -88,7 +89,7 @@ const SystemUserPage = () => {
       nickname: record.nickname ?? undefined,
       phone: record.phone ?? undefined,
       email: record.email ?? undefined,
-      departmentId: record.departmentId ?? undefined,
+      departmentId: normalizeNullablePositiveId(record.departmentId),
       status: record.status,
       roleIds: record.roles.map((r) => r.id),
     });
@@ -109,10 +110,15 @@ const SystemUserPage = () => {
     saveMutation.mutate(parsed as User.CreateDto & { id?: number }, {
       onSuccess: () => {
         setModalVisible(false);
-        setEditing(null);
-        form.resetFields();
       },
     });
+  };
+
+  const handleModalAfterOpen = (open: boolean) => {
+    if (!open) {
+      form.resetFields();
+      setEditing(null);
+    }
   };
 
   const handleTableChange = (paginationConfig: TablePaginationConfig) => {
@@ -142,7 +148,10 @@ const SystemUserPage = () => {
       title: "部门",
       dataIndex: "departmentId",
       width: 120,
-      render: (id: number | null) => (id ? departmentMap.get(id)?.name || "-" : "-"),
+      render: (id: number | null) => {
+        const departmentId = normalizeNullablePositiveId(id);
+        return departmentId ? departmentMap.get(departmentId)?.name || "-" : "-";
+      },
     },
     {
       title: "角色",
@@ -229,11 +238,10 @@ const SystemUserPage = () => {
         title={editing ? "编辑用户" : "新建用户"}
         onCancel={() => {
           setModalVisible(false);
-          setEditing(null);
-          form.resetFields();
         }}
         onOk={() => form.submit()}
         confirmLoading={saveMutation.isPending}
+        afterOpenChange={handleModalAfterOpen}
         destroyOnHidden
         width={560}
       >
